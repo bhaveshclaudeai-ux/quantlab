@@ -19,6 +19,9 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:5px 8px;b
 </style></head><body>
 <aside><h1>⚡ QuantLab</h1>
 <select id=pre onchange="usePreset(this.value)"></select>
+<h3>My strategies</h3>
+<div class=row><select id=sv></select><button onclick="svLoad()">Load</button><button onclick="svDel()">Delete</button></div>
+<div class=row><button onclick="svSave()">Save as…</button><button onclick="svExport()">Export file</button><button onclick="$('imp').click()">Import</button><input id=imp type=file accept=".json,application/json" hidden onchange="svImport(this)"></div>
 <h3>Market (Binance)</h3>
 <div class=row><input id=sym list=sy value=BTCUSDT style="width:130px"><datalist id=sy></datalist><select id=tf></select><input id=n type=number value=3000 title="Candles (max 20000)"></div>
 <h3>Direction</h3>
@@ -77,14 +80,25 @@ function applyOpt(i,P){P.forEach((p,j)=>sp(S,p,RES[i].params[j]));render();run()
 const mk=el=>LightweightCharts.createChart(el,{autoSize:true,layout:{background:{color:'transparent'},textColor:'#9aa4b2'},grid:{vertLines:{color:'#1c2430'},horzLines:{color:'#1c2430'}},timeScale:{timeVisible:true},rightPriceScale:{borderColor:'#2a3442'}});
 let pc,ec,cs,eqs;
 function show(d){const m=d.metrics,f=(v,s='')=>`<span class="${v>=0?'pos':'neg'}">${v}${s}</span>`;
- $('cards').innerHTML=[['Net return',f(m.ret,'%')],['Buy & hold',f(m.bh,'%')],['Max drawdown',f(m.dd,'%')],['Win rate',m.win+'%'],['Profit factor',m.pf],['Sharpe',m.sharpe],['Trades',m.trades],['Avg trade',f(m.avg,'%')],['Final equity',m.final]].map(([a,b])=>`<div class=card><small>${a}</small><b>${b}</b></div>`).join('');
- cs.setData(d.candles);eqs.setData(d.equity);
+ $('cards').innerHTML=[['Net return',f(m.ret,'%')],['Buy & hold',f(m.bh,'%')],['Max drawdown',f(m.dd,'%')],['Win rate',m.win+'%'],['Profit factor',m.pf],['Sharpe',m.sharpe],['Trades',m.trades,`${m.nw} wins / ${m.trades-m.nw} losses`],['Avg R:R',m.rr,`avg win ${m.aw}% · avg loss ${m.al}%`],['Avg trade',f(m.avg,'%')],['Final equity',m.final]].map(([a,b,c])=>`<div class=card><small>${a}</small><b>${b}</b>${c?`<small>${c}</small>`:''}</div>`).join('');
+ eqs.applyOptions({baseValue:{type:'price',price:+S.capital||10000}});cs.setData(d.candles);eqs.setData(d.equity);
  const mk2=[];d.trades.forEach(t=>{const L=t.side==='long';mk2.push({time:t.t0,position:L?'belowBar':'aboveBar',color:'#3b82f6',shape:L?'arrowUp':'arrowDown'},{time:t.t1,position:L?'aboveBar':'belowBar',color:t.pnl>0?'#22c55e':'#ef4444',shape:'circle'})});
- cs.setMarkers(mk2.sort((a,b)=>a.time-b.time));pc.timeScale().fitContent();ec.timeScale().fitContent();
+ cs.setMarkers(mk2.sort((a,b)=>a.time-b.time));const fit=()=>{pc.timeScale().fitContent();ec.timeScale().fitContent()};fit();setTimeout(fit,80);
  $('T').innerHTML=`<table><tr><th>#</th><th>Side</th><th>Entry time</th><th>Entry</th><th>Exit</th><th>PnL</th><th>%</th><th>Exit by</th></tr>`+d.trades.map((t,i)=>[i+1,t,t]).reverse().map(([i,t])=>`<tr><td>${i}</td><td>${t.side}</td><td>${new Date(t.t0*1000).toLocaleString()}</td><td>${t.entry.toFixed(4)}</td><td>${t.exit.toFixed(4)}</td><td class="${t.pnl>=0?'pos':'neg'}">${t.pnl.toFixed(2)}</td><td>${t.pct.toFixed(2)}</td><td>${t.why}</td></tr>`).join('')+`</table>`}
-pc=mk($('pc'));ec=mk($('ec'));cs=pc.addCandlestickSeries();eqs=ec.addLineSeries({color:'#3b82f6',lineWidth:2});
+pc=mk($('pc'));ec=mk($('ec'));cs=pc.addCandlestickSeries();eqs=ec.addBaselineSeries({baseValue:{type:'price',price:10000},lineWidth:2,topLineColor:'#22c55e',topFillColor1:'rgba(34,197,94,.28)',topFillColor2:'rgba(34,197,94,.02)',bottomLineColor:'#ef4444',bottomFillColor1:'rgba(239,68,68,.02)',bottomFillColor2:'rgba(239,68,68,.28)'});
+const SK='quantlab_saved';
+const svAll=()=>{try{return JSON.parse(localStorage.getItem(SK)||'{}')}catch(e){return{}}};
+const svPut=o=>{try{localStorage.setItem(SK,JSON.stringify(o))}catch(e){busy('⚠ Browser storage unavailable — use Export file')}};
+const snap=()=>({S:structuredClone(S),sym:$('sym').value,tf:$('tf').value,n:+$('n').value});
+function svList(sel){const k=Object.keys(svAll());$('sv').innerHTML=k.length?k.map(x=>`<option${x===sel?' selected':''}>${x.replace(/</g,'&lt;')}</option>`).join(''):'<option value="">(none saved)</option>'}
+function svApply(d){if(!d||!d.S||!d.S.direction)throw Error('Invalid strategy file');S={...structuredClone(base),...d.S};OP=[];if(d.sym)$('sym').value=d.sym;if(d.tf)$('tf').value=d.tf;if(d.n)$('n').value=d.n;render()}
+function svSave(){const n=(prompt('Strategy name?')||'').trim();if(!n)return;const a=svAll();a[n]=snap();svPut(a);svList(n);busy('Saved “'+n+'”')}
+function svLoad(){const n=$('sv').value,a=svAll();if(!a[n])return;svApply(a[n]);busy('Loaded “'+n+'”')}
+function svDel(){const n=$('sv').value,a=svAll();if(!a[n]||!confirm('Delete “'+n+'”?'))return;delete a[n];svPut(a);svList()}
+function svExport(){const b=new Blob([JSON.stringify(snap(),null,1)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='quantlab_'+$('sym').value+'.json';a.click()}
+function svImport(i){const f=i.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{svApply(JSON.parse(r.result));busy('Imported '+f.name)}catch(e){busy('⚠ '+e.message)}};r.readAsText(f);i.value=''}
 $('pre').innerHTML=Object.keys(PRE).map(k=>`<option>${k}</option>`).join('');
 $('tf').innerHTML=['1m','3m','5m','15m','30m','1h','2h','4h','1d'].map(k=>`<option ${k==='1h'?'selected':''}>${k}</option>`).join('');
-usePreset(Object.keys(PRE)[0]);
+usePreset(Object.keys(PRE)[0]);svList();
 fetch('/api/symbols').then(r=>r.json()).then(s=>$('sy').innerHTML=s.map(x=>`<option value=${x}>`).join('')).catch(()=>{});
 </script></body></html>

@@ -175,12 +175,17 @@ def metrics(df, equity, trades, tf, cap0):
     ls = [x["pnl"] for x in trades if x["pnl"] <= 0]
     pf = sum(w) / abs(sum(ls)) if ls and sum(ls) != 0 else (999.0 if w else 0.0)
     dd = float((equity / np.maximum.accumulate(equity) - 1).min()) * 100
+    wp = [x["pct"] for x in trades if x["pnl"] > 0]
+    lp = [abs(x["pct"]) for x in trades if x["pnl"] <= 0]
+    aw = float(np.mean(wp)) if wp else 0.0
+    al = float(np.mean(lp)) if lp else 0.0
+    rr = aw / al if al > 0 else 0.0
     cl = df["close"].to_numpy()
     return dict(ret=round(float((equity[-1] / cap0 - 1) * 100), 2), bh=round(float((cl[-1] / cl[0] - 1) * 100), 2),
                 dd=round(dd, 2), win=round(len(w) / len(trades) * 100, 1) if trades else 0.0,
                 pf=round(min(pf, 999.0), 2), sharpe=round(sharpe, 2), trades=len(trades),
                 avg=round(float(np.mean([x["pct"] for x in trades])), 3) if trades else 0.0,
-                final=round(float(equity[-1]), 2))
+                final=round(float(equity[-1]), 2), rr=round(rr, 2), aw=round(aw, 2), al=round(al, 2), nw=len(w))
 
 # ---------------- api ----------------
 class Req(BaseModel):
