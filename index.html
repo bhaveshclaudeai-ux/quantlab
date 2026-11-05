@@ -1,0 +1,90 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>QuantLab</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+:root{--bg:#0b0f14;--p:#121923;--b:#223044;--t:#e6edf3;--m:#8b98a9;--g:#22c55e;--r:#ef4444;--a:#3b82f6}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--t);font:14px system-ui,sans-serif;display:grid;grid-template-columns:410px 1fr;height:100vh}
+aside{background:var(--p);border-right:1px solid var(--b);overflow:auto;padding:14px}main{overflow:auto;padding:16px}
+@media(max-width:900px){body{display:block;height:auto}}
+h1{font-size:18px;margin:0 0 10px}h3{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--m);margin:16px 0 6px}
+input,select,button{background:#0d141d;color:var(--t);border:1px solid var(--b);border-radius:6px;padding:6px 8px;font:inherit}
+button{cursor:pointer}button.pri{background:var(--a);border-color:var(--a);font-weight:600}
+.row{display:flex;gap:6px;align-items:center;margin:5px 0;flex-wrap:wrap}.row input{width:72px}.row select{max-width:125px}
+.grp{border:1px solid var(--b);border-radius:8px;padding:8px;margin:8px 0}.gh{display:flex;justify-content:space-between;align-items:center;gap:6px}
+.risk{display:grid;grid-template-columns:1fr 1fr;gap:6px}.risk label{font-size:12px;color:var(--m)}.risk input{width:100%}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px}.card{background:var(--p);border:1px solid var(--b);border-radius:8px;padding:10px}.card small{color:var(--m);display:block}.card b{font-size:18px}
+.ch{height:330px;margin:12px 0;background:var(--p);border:1px solid var(--b);border-radius:8px;overflow:hidden}
+table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:5px 8px;border-bottom:1px solid var(--b);text-align:right}th{color:var(--m);position:sticky;top:0;background:var(--p)}
+.box{max-height:320px;overflow:auto;background:var(--p);border:1px solid var(--b);border-radius:8px;margin:12px 0}
+.pos{color:var(--g)}.neg{color:var(--r)}#msg{margin-top:8px;color:var(--m)}h2{font-size:14px;margin:18px 0 0}
+</style></head><body>
+<aside><h1>⚡ QuantLab</h1>
+<select id=pre onchange="usePreset(this.value)"></select>
+<h3>Market (Binance)</h3>
+<div class=row><input id=sym list=sy value=BTCUSDT style="width:130px"><datalist id=sy></datalist><select id=tf></select><input id=n type=number value=3000 title="Candles (max 20000)"></div>
+<h3>Direction</h3>
+<select id=dir onchange="S.direction=this.value"><option value=long>Long only</option><option value=short>Short only</option><option value=both>Long + Short</option></select>
+<h3>Rules (entry fills at next candle open)</h3><div id=G></div>
+<h3>Risk &amp; costs</h3><div class=risk id=R></div>
+<h3>Optimizer</h3><div id=O></div>
+<div class=row><button onclick="addOpt()">+ parameter</button>
+<select id=met><option value=return_dd>Return / MaxDD</option><option value=return>Net return</option><option value=sharpe>Sharpe</option><option value=pf>Profit factor</option></select>
+<input id=mt type=number value=10 title="Min trades"></div>
+<div class=row style="margin-top:14px"><button class=pri onclick="run()">Run backtest</button><button onclick="opt()">Optimize</button></div><div id=msg></div></aside>
+<main><div class=cards id=cards></div><div class=ch id=pc></div><div class=ch id=ec style="height:220px"></div>
+<div id=ores></div><h2>Trades</h2><div class=box id=T></div></main>
+<script>
+const $=id=>document.getElementById(id);
+const KINDS={close:0,open:0,high:0,low:0,volume:0,macd:0,macd_sig:0,vwap:0,ema:1,sma:1,rsi:1,atr:1,bb_up:1,bb_lo:1,hh:1,ll:1,vol_sma:1,num:2};
+const OPS={'>':'is above','<':'is below',x_up:'crosses above',x_dn:'crosses below'};
+const GN={entry_long:'Long entry',exit_long:'Long exit',entry_short:'Short entry',exit_short:'Short exit'};
+const O=(k,x)=>k==='num'?{k,v:x}:{k,p:x},rl=(l,op,r)=>({l,op,r}),G=(...r)=>({logic:'AND',rules:r});
+const base={sl_pct:1,tp_pct:2,fee_pct:0.05,capital:10000,size_pct:100,leverage:1};
+const PRE={
+'EMA 9/21 crossover':{direction:'both',entry_long:G(rl(O('ema',9),'x_up',O('ema',21))),entry_short:G(rl(O('ema',9),'x_dn',O('ema',21))),exit_long:G(),exit_short:G()},
+'RSI mean reversion':{direction:'long',entry_long:G(rl(O('rsi',14),'x_up',O('num',30))),exit_long:G(rl(O('rsi',14),'>',O('num',60))),entry_short:G(),exit_short:G()},
+'Donchian breakout':{direction:'long',entry_long:G(rl(O('close'),'>',O('hh',20))),exit_long:G(rl(O('close'),'<',O('ll',10))),entry_short:G(),exit_short:G()}};
+const RF=[['sl_pct','Stop loss % (0=off)'],['tp_pct','Take profit % (0=off)'],['fee_pct','Fee % per side'],['capital','Capital'],['size_pct','Position size %'],['leverage','Leverage']];
+let S,OP=[],RES=[];
+const sp=(o,p,v)=>{const a=p.split('.');gp(o,a.slice(0,-1).join('.')||'')[a.at(-1)]=v};
+function gp(o,p){return p?p.split('.').reduce((a,k)=>a[k],o):o}
+function usePreset(n){S={...structuredClone(base),...structuredClone(PRE[n])};OP=[];render()}
+function opH(g,i,s,o){const b=`'${g}',${i},'${s}'`;return `<select onchange="setK(${b},this.value)">${Object.keys(KINDS).map(k=>`<option ${k===o.k?'selected':''}>${k}</option>`).join('')}</select>`+(KINDS[o.k]?`<input type=number step=any value="${o.k==='num'?o.v:o.p}" oninput="setV(${b},this.value)">`:'')}
+function render(){
+ $('dir').value=S.direction;
+ $('R').innerHTML=RF.map(([k,l])=>`<div><label>${l}</label><input type=number step=any value="${S[k]}" oninput="S['${k}']=+this.value"></div>`).join('');
+ $('G').innerHTML=Object.keys(GN).map(g=>`<div class=grp><div class=gh><b>${GN[g]}</b><span><select onchange="S.${g}.logic=this.value"><option ${S[g].logic==='AND'?'selected':''}>AND</option><option ${S[g].logic==='OR'?'selected':''}>OR</option></select> <button onclick="addRule('${g}')">+ rule</button></span></div>`+
+  S[g].rules.map((r,i)=>`<div class=row>${opH(g,i,'l',r.l)}<select onchange="S.${g}.rules[${i}].op=this.value">${Object.entries(OPS).map(([k,v])=>`<option value="${k}" ${k===r.op?'selected':''}>${v}</option>`).join('')}</select>${opH(g,i,'r',r.r)}<button onclick="S.${g}.rules.splice(${i},1);render()">×</button></div>`).join('')+`</div>`).join('');
+ renderOpt()}
+function addRule(g){S[g].rules.push(rl(O('ema',9),'x_up',O('ema',21)));render()}
+function setK(g,i,s,k){S[g].rules[i][s]=O(k,k==='num'?30:14);render()}
+function setV(g,i,s,v){const o=S[g].rules[i][s];o[o.k==='num'?'v':'p']=+v}
+function cands(){const c=[];for(const g in GN)S[g].rules.forEach((r,i)=>['l','r'].forEach(s=>{const o=r[s],b=`${g}.rules.${i}.${s}`;if(KINDS[o.k]===1)c.push([b+'.p',`${GN[g]} #${i+1} ${o.k.toUpperCase()} period`]);if(o.k==='num')c.push([b+'.v',`${GN[g]} #${i+1} level`])}));c.push(['sl_pct','Stop loss %'],['tp_pct','Take profit %']);return c}
+function addOpt(){const c=cands().filter(x=>!OP.some(p=>p.path===x[0]));if(!c.length)return;const path=c[0][0],cur=+gp(S,path)||5;
+ OP.push(path.endsWith('_pct')?{path,start:.5,end:3,step:.5}:{path,start:Math.max(2,Math.round(cur/2)),end:cur*2,step:Math.max(1,Math.round(cur/5))});renderOpt()}
+function renderOpt(){const c=cands();OP=OP.filter(p=>c.some(x=>x[0]===p.path));
+ $('O').innerHTML=OP.map((p,i)=>`<div class=row><select onchange="OP[${i}].path=this.value">${c.map(x=>`<option value="${x[0]}" ${x[0]===p.path?'selected':''}>${x[1]}</option>`).join('')}</select>`+['start','end','step'].map(k=>`<input type=number step=any value=${p[k]} title=${k} oninput="OP[${i}].${k}=+this.value">`).join('')+`<button onclick="OP.splice(${i},1);renderOpt()">×</button></div>`).join('')}
+async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.detail||'Server error '+r.status);return j}
+const req=()=>({symbol:$('sym').value,interval:$('tf').value,candles:+$('n').value,strategy:S});
+const busy=t=>$('msg').textContent=t;
+async function run(){busy('Fetching data & backtesting…');try{show(await post('/api/backtest',req()));busy('')}catch(e){busy('⚠ '+e.message)}}
+async function opt(){if(!OP.length)return busy('Add at least one parameter to optimize');busy('Optimizing… (can take a while)');
+ try{const d=await post('/api/optimize',{...req(),params:OP.map(({path,start,end,step})=>({path,start,end,step})),metric:$('met').value,min_trades:+$('mt').value});
+  const lab=Object.fromEntries(cands());RES=d.results;const P=OP.map(p=>p.path);
+  $('ores').innerHTML=`<h2>Optimizer — ${d.kept} of ${d.total} combos passed (top 30)</h2><div class=box><table><tr>${P.map(p=>`<th>${lab[p]}</th>`).join('')}<th>Return%</th><th>MaxDD%</th><th>Win%</th><th>PF</th><th>Sharpe</th><th>Trades</th><th></th></tr>`+
+  RES.map((r,i)=>`<tr>${r.params.map(v=>`<td>${v}</td>`).join('')}<td class="${r.m.ret>=0?'pos':'neg'}">${r.m.ret}</td><td>${r.m.dd}</td><td>${r.m.win}</td><td>${r.m.pf}</td><td>${r.m.sharpe}</td><td>${r.m.trades}</td><td><button onclick="applyOpt(${i},${JSON.stringify(P).replace(/"/g,'&quot;')})">Apply</button></td></tr>`).join('')+`</table></div>`;
+  busy(d.kept?'Tip: re-test best results on a different period to avoid overfitting.':'No combination met the min-trades filter.')}catch(e){busy('⚠ '+e.message)}}
+function applyOpt(i,P){P.forEach((p,j)=>sp(S,p,RES[i].params[j]));render();run()}
+const mk=el=>LightweightCharts.createChart(el,{autoSize:true,layout:{background:{color:'transparent'},textColor:'#9aa4b2'},grid:{vertLines:{color:'#1c2430'},horzLines:{color:'#1c2430'}},timeScale:{timeVisible:true},rightPriceScale:{borderColor:'#2a3442'}});
+let pc,ec,cs,eqs;
+function show(d){const m=d.metrics,f=(v,s='')=>`<span class="${v>=0?'pos':'neg'}">${v}${s}</span>`;
+ $('cards').innerHTML=[['Net return',f(m.ret,'%')],['Buy & hold',f(m.bh,'%')],['Max drawdown',f(m.dd,'%')],['Win rate',m.win+'%'],['Profit factor',m.pf],['Sharpe',m.sharpe],['Trades',m.trades],['Avg trade',f(m.avg,'%')],['Final equity',m.final]].map(([a,b])=>`<div class=card><small>${a}</small><b>${b}</b></div>`).join('');
+ cs.setData(d.candles);eqs.setData(d.equity);
+ const mk2=[];d.trades.forEach(t=>{const L=t.side==='long';mk2.push({time:t.t0,position:L?'belowBar':'aboveBar',color:'#3b82f6',shape:L?'arrowUp':'arrowDown'},{time:t.t1,position:L?'aboveBar':'belowBar',color:t.pnl>0?'#22c55e':'#ef4444',shape:'circle'})});
+ cs.setMarkers(mk2.sort((a,b)=>a.time-b.time));pc.timeScale().fitContent();ec.timeScale().fitContent();
+ $('T').innerHTML=`<table><tr><th>#</th><th>Side</th><th>Entry time</th><th>Entry</th><th>Exit</th><th>PnL</th><th>%</th><th>Exit by</th></tr>`+d.trades.map((t,i)=>[i+1,t,t]).reverse().map(([i,t])=>`<tr><td>${i}</td><td>${t.side}</td><td>${new Date(t.t0*1000).toLocaleString()}</td><td>${t.entry.toFixed(4)}</td><td>${t.exit.toFixed(4)}</td><td class="${t.pnl>=0?'pos':'neg'}">${t.pnl.toFixed(2)}</td><td>${t.pct.toFixed(2)}</td><td>${t.why}</td></tr>`).join('')+`</table>`}
+pc=mk($('pc'));ec=mk($('ec'));cs=pc.addCandlestickSeries();eqs=ec.addLineSeries({color:'#3b82f6',lineWidth:2});
+$('pre').innerHTML=Object.keys(PRE).map(k=>`<option>${k}</option>`).join('');
+$('tf').innerHTML=['1m','3m','5m','15m','30m','1h','2h','4h','1d'].map(k=>`<option ${k==='1h'?'selected':''}>${k}</option>`).join('');
+usePreset(Object.keys(PRE)[0]);
+fetch('/api/symbols').then(r=>r.json()).then(s=>$('sy').innerHTML=s.map(x=>`<option value=${x}>`).join('')).catch(()=>{});
+</script></body></html>
