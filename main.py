@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 app = FastAPI(title="QuantLab")
 HERE = os.path.dirname(os.path.abspath(__file__))
-BASES = ["https://data-api.binance.vision", "https://api.binance.com", "https://api1.binance.com"]
+BASES = ["https://data-api.binance.vision", "https://api.binance.com", "https://api1.binance.com", "https://api.binance.us"]
 TF = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "2h": 120, "4h": 240, "1d": 1440}
 GROUPS = ("entry_long", "exit_long", "entry_short", "exit_short")
 CACHE = {}
@@ -22,7 +22,7 @@ def _get(path, params):
             err = r.text[:200]
         except requests.RequestException as e:
             err = str(e)
-    raise HTTPException(502, f"Binance data error: {err}")
+    raise HTTPException(502, f"Data source error (shared server IP may be rate-limited, try again in a few minutes): {err}")
 
 @app.get("/api/symbols")
 def symbols():
