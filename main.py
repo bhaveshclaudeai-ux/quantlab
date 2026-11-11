@@ -127,6 +127,7 @@ def backtest(df, s):
     cap0 = float(s.get("capital") or 10000)
     size = float(s.get("size_pct") or 100) / 100 * float(s.get("leverage") or 1)
     eq, pos, ent, qty, ei = cap0, 0, 0.0, 0.0, 0
+    eq0 = cap0
     equity, trades = np.full(n, cap0), []
 
     def close(i, px, why):
@@ -135,7 +136,7 @@ def backtest(df, s):
         eq += gross - fee * qty * px
         pnl = gross - fee * qty * (ent + px)
         trades.append(dict(side="long" if pos > 0 else "short", t0=int(t[ei]), t1=int(t[i]),
-                           entry=float(ent), exit=float(px), pnl=float(pnl), pct=float(pnl / (qty * ent) * 100), why=why))
+                           entry=float(ent), exit=float(px), pnl=float(pnl), pct=float(pnl / (qty * ent) * 100), ret=float(pnl / eq0), why=why))
         pos = 0
 
     for i in range(1, n):
@@ -151,6 +152,7 @@ def backtest(df, s):
             close(i, o[i], "signal")
         if pos == 0 and (wl or ws):
             pos, ent, ei = (1 if wl else -1), o[i], i
+            eq0 = eq
             qty = eq * size / ent
             eq -= fee * qty * ent
         if pos:
@@ -237,11 +239,15 @@ def api_optimize(q: OptReq):
     total = math.prod(len(r) for r in ranges)
     if total > 1500:
         raise HTTPException(400, f"{total} combinations — limit is 1500. Reduce range or increase step.")
+    L = [len(r) for r in ranges]
+    fmt = lambda p, v: int(round(v)) if p["path"].endswith(".p") else round(float(v), 4)
+    two = len(q.params) == 2
+    Z = np.full((L[0], L[1]), np.nan) if two else None
     out = []
-    for combo in itertools.product(*ranges):
+    for idx in itertools.product(*[range(k) for k in L]):
         s, vals = copy.deepcopy(q.strategy), []
-        for p, v in zip(q.params, combo):
-            v = int(round(v)) if p["path"].endswith(".p") else round(float(v), 4)
+        for p, r, i in zip(q.params, ranges, idx):
+            v = fmt(p, r[i])
             set_path(s, p["path"], v)
             vals.append(v)
         try:
@@ -252,9 +258,60 @@ def api_optimize(q: OptReq):
         if m["trades"] < q.min_trades:
             continue
         score = {"return": m["ret"], "sharpe": m["sharpe"], "pf": m["pf"]}.get(q.metric, m["ret"] / max(abs(m["dd"]), 1))
+        if two:
+            Z[idx] = score
         out.append(dict(params=vals, m=m, score=score))
     out.sort(key=lambda x: -x["score"])
-    return dict(total=total, kept=len(out), results=out[:30])
+    res = dict(total=total, kept=len(out), results=out[:30])
+    if two and out:  # plateau analysis: average score of each 3x3 neighbourhood
+        SM = np.full(Z.shape, np.nan)
+        for i in range(L[0]):
+            for j in range(L[1]):
+                if np.isnan(Z[i, j]):
+                    continue
+                w = Z[max(i - 1, 0):i + 2, max(j - 1, 0):j + 2]
+                if np.sum(~np.isnan(w)) >= 5:
+                    SM[i, j] = np.nanmean(w)
+        cl = lambda M: [[None if np.isnan(x) else round(float(x), 3) for x in row] for row in M]
+        b = np.unravel_index(np.nanargmax(Z), Z.shape)
+        pl = None if np.all(np.isnan(SM)) else np.unravel_index(np.nanargmax(SM), SM.shape)
+        res["grid"] = dict(xs=[fmt(q.params[0], v) for v in ranges[0]], ys=[fmt(q.params[1], v) for v in ranges[1]],
+                           z=cl(Z), s=cl(SM), best=[int(b[0]), int(b[1])],
+                           plat=None if pl is None else [int(pl[0]), int(pl[1])])
+    return res
+
+class MCReq(Req):
+    sims: int = 1000
+    method: str = "bootstrap"
+    ruin_pct: float = 50.0
+
+@app.post("/api/montecarlo")
+def api_mc(q: MCReq):
+    df = prep(q)
+    try:
+        _, trades, cap0 = backtest(df, q.strategy)
+    except Exception as e:
+        raise HTTPException(400, f"Strategy error: {e!r}")
+    if len(trades) < 10:
+        raise HTTPException(400, f"Only {len(trades)} trades — Monte Carlo needs at least 10")
+    r = np.array([t["ret"] for t in trades])
+    n, S = len(r), max(100, min(q.sims, 5000))
+    rng = np.random.default_rng(42)
+    idx = np.argsort(rng.random((S, n)), axis=1) if q.method == "shuffle" else rng.integers(0, n, (S, n))
+    paths = np.concatenate([np.ones((S, 1)), np.cumprod(1 + r[idx], axis=1)], axis=1) * cap0
+    dd = (paths / np.maximum.accumulate(paths, axis=1) - 1).min(axis=1) * 100
+    fin = (paths[:, -1] / cap0 - 1) * 100
+    pc = np.percentile(paths, [5, 25, 50, 75, 95], axis=0)
+    act = cap0 * np.concatenate([[1.0], np.cumprod(1 + r)])
+    rd = lambda a: [round(float(x), 2) for x in a]
+    adn = float((act / np.maximum.accumulate(act) - 1).min() * 100)
+    return dict(n=n, sims=S, method=q.method, ruin_pct=q.ruin_pct, actual=rd(act),
+                bands={k: rd(v) for k, v in zip(("p5", "p25", "p50", "p75", "p95"), pc)},
+                stats=dict(med_ret=round(float(np.median(fin)), 2), p5_ret=round(float(np.percentile(fin, 5)), 2),
+                           p95_ret=round(float(np.percentile(fin, 95)), 2), prob_profit=round(float((fin > 0).mean() * 100), 1),
+                           med_dd=round(float(np.median(dd)), 2), worst_dd=round(float(np.percentile(dd, 5)), 2),
+                           ruin=round(float((dd <= -q.ruin_pct).mean() * 100), 1),
+                           actual_ret=round(float((act[-1] / cap0 - 1) * 100), 2), actual_dd=round(adn, 2)))
 
 @app.get("/")
 def index():
