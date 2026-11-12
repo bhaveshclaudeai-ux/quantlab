@@ -17,15 +17,17 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:5px 8px;b
 .box{max-height:320px;overflow:auto;background:var(--p);border:1px solid var(--b);border-radius:8px;margin:12px 0}
 .pos{color:var(--g)}.neg{color:var(--r)}#msg{margin-top:8px;color:var(--m)}h2{font-size:14px;margin:18px 0 0}
 #cl{max-height:200px;overflow:auto;font-size:13px;background:#0d141d;border:1px solid var(--b);border-radius:8px;padding:6px 10px}#cl p{margin:6px 0}#cl .u{color:#93c5fd}
+.it{border:1px solid var(--b);border-radius:8px;padding:8px;margin:6px 0}.sub{color:var(--m);font-size:12px}.sub2{color:#6b7a8d;font-size:11px;margin:3px 0 4px;word-break:break-word}#tt.on,#th.on{background:var(--a);border-color:var(--a)}
 </style></head><body>
 <aside><h1>⚡ QuantLab</h1>
 <select id=pre onchange="usePreset(this.value)"></select>
 <h3>💬 Strategy chat</h3>
 <div id=cl></div>
 <div class=row><input id=ci style="flex:1;width:auto;min-width:140px" placeholder="e.g. long when ema 9 crosses above ema 21, sl 1% tp 2%" onkeydown="if(event.key==='Enter')chat()"><button class=pri onclick="chat()">Send</button></div>
-<h3>My strategies</h3>
-<div class=row><select id=sv></select><button onclick="svLoad()">Load</button><button onclick="svDel()">Delete</button></div>
-<div class=row><button onclick="svSave()">Save as…</button><button onclick="svExport()">Export file</button><button onclick="$('imp').click()">Import</button><input id=imp type=file accept=".json,application/json" hidden onchange="svImport(this)"></div>
+<h3>📚 Library</h3>
+<div class=row><button id=tt onclick="libTab('tpl')">⭐ Templates</button><button id=th onclick="libTab('hist')">🕘 History</button></div>
+<div id=lib class=box style="padding:4px 8px;margin:6px 0"></div>
+<div class=row><button onclick="tplSave()">★ Save template</button><button onclick="svExport()">Export current</button><button onclick="svBackup()">Backup all</button><button onclick="$('imp').click()">Import</button><button onclick="histClear()">Clear history</button><input id=imp type=file accept=".json,application/json" hidden onchange="svImport(this)"></div>
 <h3>Market (Binance)</h3>
 <div class=row><input id=sym list=sy value=BTCUSDT style="width:130px"><datalist id=sy></datalist><select id=tf></select><input id=n type=number value=3000 title="Candles (max 20000)"></div>
 <h3>Direction</h3>
@@ -115,26 +117,43 @@ async function chat(){const i=$('ci'),m=i.value.trim();if(!m)return;i.value='';s
  catch(e){say('a','⚠ '+e.message);busy('')}}
 const mk=el=>LightweightCharts.createChart(el,{autoSize:true,layout:{background:{color:'transparent'},textColor:'#9aa4b2'},grid:{vertLines:{color:'#1c2430'},horzLines:{color:'#1c2430'}},timeScale:{timeVisible:true},rightPriceScale:{borderColor:'#2a3442'}});
 let pc,ec,cs,eqs;
-function show(d){const m=d.metrics,f=(v,s='')=>`<span class="${v>=0?'pos':'neg'}">${v}${s}</span>`;
+function show(d){histAdd(d.metrics);const m=d.metrics,f=(v,s='')=>`<span class="${v>=0?'pos':'neg'}">${v}${s}</span>`;
  $('cards').innerHTML=[['Net return',f(m.ret,'%')],['Buy & hold',f(m.bh,'%')],['Max drawdown',f(m.dd,'%')],['Win rate',m.win+'%'],['Profit factor',m.pf],['Sharpe',m.sharpe],['Trades',m.trades,`${m.nw} wins / ${m.trades-m.nw} losses`],['Avg R:R',m.rr,`avg win ${m.aw}% · avg loss ${m.al}%`],['Avg trade',f(m.avg,'%')],['Final equity',m.final]].map(([a,b,c])=>`<div class=card><small>${a}</small><b>${b}</b>${c?`<small>${c}</small>`:''}</div>`).join('');
  eqs.applyOptions({baseValue:{type:'price',price:+S.capital||10000}});cs.setData(d.candles);eqs.setData(d.equity);
  const mk2=[];d.trades.forEach(t=>{const L=t.side==='long';mk2.push({time:t.t0,position:L?'belowBar':'aboveBar',color:'#3b82f6',shape:L?'arrowUp':'arrowDown'},{time:t.t1,position:L?'aboveBar':'belowBar',color:t.pnl>0?'#22c55e':'#ef4444',shape:'circle'})});
  cs.setMarkers(mk2.sort((a,b)=>a.time-b.time));const fit=()=>{pc.timeScale().fitContent();ec.timeScale().fitContent()};fit();setTimeout(fit,80);
  $('T').innerHTML=`<table><tr><th>#</th><th>Side</th><th>Entry time</th><th>Entry</th><th>Exit</th><th>PnL</th><th>%</th><th>Exit by</th></tr>`+d.trades.map((t,i)=>[i+1,t,t]).reverse().map(([i,t])=>`<tr><td>${i}</td><td>${t.side}</td><td>${new Date(t.t0*1000).toLocaleString()}</td><td>${t.entry.toFixed(4)}</td><td>${t.exit.toFixed(4)}</td><td class="${t.pnl>=0?'pos':'neg'}">${t.pnl.toFixed(2)}</td><td>${t.pct.toFixed(2)}</td><td>${t.why}</td></tr>`).join('')+`</table>`}
 pc=mk($('pc'));ec=mk($('ec'));cs=pc.addCandlestickSeries();eqs=ec.addBaselineSeries({baseValue:{type:'price',price:10000},lineWidth:2,topLineColor:'#22c55e',topFillColor1:'rgba(34,197,94,.28)',topFillColor2:'rgba(34,197,94,.02)',bottomLineColor:'#ef4444',bottomFillColor1:'rgba(239,68,68,.02)',bottomFillColor2:'rgba(239,68,68,.28)'});
-const SK='quantlab_saved';
-const svAll=()=>{try{return JSON.parse(localStorage.getItem(SK)||'{}')}catch(e){return{}}};
-const svPut=o=>{try{localStorage.setItem(SK,JSON.stringify(o))}catch(e){busy('⚠ Browser storage unavailable — use Export file')}};
+const SK='quantlab_saved',HK='quantlab_hist';let LT='tpl',LASTM=null,LASTK='';
+const rd=(k,d)=>{try{return JSON.parse(localStorage.getItem(k)||d)}catch(e){return JSON.parse(d)}};
+const wr=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){busy('⚠ Browser storage full or unavailable — use Backup all')}};
+const svAll=()=>rd(SK,'{}'),histAll=()=>rd(HK,'[]');
 const snap=()=>({S:structuredClone(S),sym:$('sym').value,tf:$('tf').value,n:+$('n').value});
-function svList(sel){const k=Object.keys(svAll());$('sv').innerHTML=k.length?k.map(x=>`<option${x===sel?' selected':''}>${x.replace(/</g,'&lt;')}</option>`).join(''):'<option value="">(none saved)</option>'}
+const skey=x=>JSON.stringify([x.S,x.sym,x.tf,x.n]);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const opn=o=>o.k==='num'?o.v:o.k.toUpperCase()+(o.p?' '+o.p:'')+(o.q!==undefined?'@'+o.q:'');
+const SYM={'>':'>','<':'<',x_up:'↗',x_dn:'↘'};
+function desc(s){const g=(k,t)=>s[k]&&s[k].rules.length?t+s[k].rules.map(r=>`${opn(r.l)} ${SYM[r.op]} ${opn(r.r)}`).join(s[k].logic==='OR'?' | ':' & '):'';
+ return [g('entry_long','Long: '),g('entry_short','Short: '),g('exit_long','Exit L: '),g('exit_short','Exit S: ')].filter(Boolean).join('  ·  ')+(s.sl_pct?`  ·  SL ${s.sl_pct}%`:'')+(s.tp_pct?` TP ${s.tp_pct}%`:'')}
+const ago=t=>{const m=Math.round((Date.now()-t)/6e4);return m<1?'just now':m<60?m+' min ago':m<1440?Math.round(m/60)+' h ago':Math.round(m/1440)+' d ago'};
+function histAdd(m){const e={...snap(),m,t:Date.now()},a=histAll();LASTM=m;LASTK=skey(e);if(a.length&&skey(a[0])===LASTK)a[0]=e;else a.unshift(e);wr(HK,a.slice(0,100));if(LT==='hist')libRender()}
+function libTab(t){LT=t;libRender()}
+function libRender(){const T=svAll(),H=histAll();$('tt').className=LT==='tpl'?'on':'';$('th').className=LT==='hist'?'on':'';
+ const it=(title,e,kind,i)=>{const m=e.m;return `<div class=it><b>${esc(title)}</b><div class=sub>${e.sym||''} ${e.tf||''}${m?` · <span class="${m.ret>=0?'pos':'neg'}">${m.ret}%</span> · DD ${m.dd}% · ${m.trades} trades · PF ${m.pf}`:''}${kind==='tpl'&&e.t?' · saved '+ago(e.t):''}</div><div class=sub2>${esc(desc(e.S))}</div><div class=row><button onclick="libLoad('${kind}',${i})">Load &amp; run</button>`+(kind==='hist'?`<button onclick="libStar(${i})">★ Template</button>`:`<button onclick="libRen(${i})">Rename</button>`)+`<button onclick="libDel('${kind}',${i})">Delete</button></div></div>`};
+ $('lib').innerHTML=LT==='tpl'?(Object.keys(T).map((n,i)=>it(n,T[n],'tpl',i)).join('')||'<p class=sub>No templates yet. Run a backtest you like, then tap “★ Save template”.</p>'):(H.map((e,i)=>it(new Date(e.t).toLocaleString([],{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}),e,'hist',i)).join('')||'<p class=sub>No history yet. Every backtest you run is saved here automatically.</p>')}
 function svApply(d){if(!d||!d.S||!d.S.direction)throw Error('Invalid strategy file');S={...structuredClone(base),...d.S};OP=[];if(d.sym)$('sym').value=d.sym;if(d.tf)$('tf').value=d.tf;if(d.n)$('n').value=d.n;render()}
-function svSave(){const n=(prompt('Strategy name?')||'').trim();if(!n)return;const a=svAll();a[n]=snap();svPut(a);svList(n);busy('Saved “'+n+'”')}
-function svLoad(){const n=$('sv').value,a=svAll();if(!a[n])return;svApply(a[n]);busy('Loaded “'+n+'”')}
-function svDel(){const n=$('sv').value,a=svAll();if(!a[n]||!confirm('Delete “'+n+'”?'))return;delete a[n];svPut(a);svList()}
-function svExport(){const b=new Blob([JSON.stringify(snap(),null,1)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='quantlab_'+$('sym').value+'.json';a.click()}
-function svImport(i){const f=i.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{svApply(JSON.parse(r.result));busy('Imported '+f.name)}catch(e){busy('⚠ '+e.message)}};r.readAsText(f);i.value=''}
+function libLoad(k,i){const e=k==='tpl'?svAll()[Object.keys(svAll())[i]]:histAll()[i];if(!e)return;try{svApply(e);busy('');run()}catch(x){busy('⚠ '+x.message)}}
+function libDel(k,i){if(k==='tpl'){const a=svAll(),n=Object.keys(a)[i];if(!confirm('Delete template “'+n+'”?'))return;delete a[n];wr(SK,a)}else{const a=histAll();a.splice(i,1);wr(HK,a)}libRender()}
+function tplPut(e){const n=(prompt('Template name?')||'').trim();if(!n)return;const a=svAll();if(a[n]&&!confirm('“'+n+'” already exists. Overwrite?'))return;a[n]={...e,t:Date.now()};wr(SK,a);LT='tpl';libRender();busy('Saved template “'+n+'” ⭐')}
+function libStar(i){const e=histAll()[i];if(e)tplPut(e)}
+function tplSave(){const e=snap();tplPut({...e,m:LASTK===skey(e)?LASTM:null})}
+function libRen(i){const a=svAll(),o=Object.keys(a)[i],n=(prompt('New name?',o)||'').trim();if(!n||n===o)return;if(a[n]&&!confirm('“'+n+'” already exists. Overwrite?'))return;const r={};for(const k of Object.keys(a)){if(k===o)r[n]=a[o];else if(k!==n)r[k]=a[k]}wr(SK,r);libRender()}
+function histClear(){if(confirm('Clear all history? (Templates are kept)')){wr(HK,[]);libRender()}}
+const dl=(o,f)=>{const b=new Blob([JSON.stringify(o,null,1)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=f;a.click()};
+const svExport=()=>dl(snap(),'quantlab_'+$('sym').value+'.json'),svBackup=()=>dl({templates:svAll(),history:histAll()},'quantlab_backup.json');
+function svImport(i){const f=i.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{const d=JSON.parse(r.result);if(d.templates){wr(SK,{...svAll(),...d.templates});wr(HK,[...histAll(),...(d.history||[])].sort((a,b)=>b.t-a.t).slice(0,100));libRender();busy('Backup imported')}else{svApply(d);busy('Imported '+f.name)}}catch(e){busy('⚠ '+e.message)}};r.readAsText(f);i.value=''}
 $('pre').innerHTML=Object.keys(PRE).map(k=>`<option>${k}</option>`).join('');
 $('tf').innerHTML=['1m','3m','5m','15m','30m','1h','2h','4h','1d'].map(k=>`<option ${k==='1h'?'selected':''}>${k}</option>`).join('');
-usePreset(Object.keys(PRE)[0]);svList();say('a','Hi! Apni strategy words mein likho, jaise: “long when ema 9 crosses above ema 21 and rsi below 70, exit when rsi above 80, sl 1% tp 2%”. Candle patterns (hammer, bullish engulfing), previous day high/low, opening range (“15 min opening range from 13:30 utc”), volume profile (poc, vah, val), supertrend, adx, stoch, time window (between 8 and 20 utc) sab chalte hain. “new strategy” se reset.');
+usePreset(Object.keys(PRE)[0]);libRender();say('a','Hi! Apni strategy words mein likho, jaise: “long when ema 9 crosses above ema 21 and rsi below 70, exit when rsi above 80, sl 1% tp 2%”. Candle patterns (hammer, bullish engulfing), previous day high/low, opening range (“15 min opening range from 13:30 utc”), volume profile (poc, vah, val), supertrend, adx, stoch, time window (between 8 and 20 utc) sab chalte hain. “new strategy” se reset.');
 fetch('/api/symbols').then(r=>r.json()).then(s=>$('sy').innerHTML=s.map(x=>`<option value=${x}>`).join('')).catch(()=>{});
 </script></body></html>
