@@ -1,4 +1,4 @@
-import copy, itertools, math, os, re, time
+import copy, itertools, json, math, os, re, time
 import numpy as np, pandas as pd, requests
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -59,10 +59,82 @@ def load(sym, tf, n):
     return df.tail(n).reset_index(drop=True)
 
 # ---------------- indicators / signals ----------------
-def ind(df, k, p):
+CATALOG = {
+    "Price": {"close": 0, "open": 0, "high": 0, "low": 0, "volume": 0},
+    "Trend": {"ema": 1, "sma": 1, "supertrend": 1, "vwap": 0, "adx": 1, "plus_di": 1, "minus_di": 1, "hh": 1, "ll": 1},
+    "Momentum": {"rsi": 1, "macd": 0, "macd_sig": 0, "stoch": 1, "cci": 1, "roc": 1},
+    "Volatility": {"atr": 1, "bb_up": 1, "bb_lo": 1, "body_pct": 0, "range_pct": 0},
+    "Volume": {"vol_sma": 1},
+    "Opening range": {"or_high": 3, "or_low": 3},
+    "Volume profile": {"vp_poc": 1, "vp_vah": 1, "vp_val": 1},
+    "Price action": {"day_open": 0, "day_high": 0, "day_low": 0, "pw_high": 0, "pw_low": 0, "prev_high": 0, "prev_low": 0, "prev_close": 0, "pd_high": 0, "pd_low": 0, "pd_close": 0,
+                     "bull_candle": 0, "bear_candle": 0, "bull_engulf": 0, "bear_engulf": 0, "hammer": 0,
+                     "shooting_star": 0, "doji": 0, "inside_bar": 0},
+    "Time": {"hour": 0, "dow": 0},
+}
+KIND_FLAG = {k: v for g in CATALOG.values() for k, v in g.items()}
+KIND_FLAG["num"] = 2
+PATTERNS = ("bull_candle", "bear_candle", "bull_engulf", "bear_engulf", "hammer", "shooting_star", "doji", "inside_bar")
+
+def _tr(df):
+    h, l, c = df["high"], df["low"], df["close"]
+    return pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+
+_VP = {}
+
+def _vp(df, p, bins=100, va=0.7):
+    """Volume profile of the previous p days, per day: (POC, VAH, VAL). Volume is spread evenly over each candle's range."""
+    key = (len(df), int(df["t"].iat[0]), int(df["t"].iat[-1]), p)
+    if key in _VP:
+        return _VP[key]
+    t, h, l, v = df["t"].to_numpy(), df["high"].to_numpy(), df["low"].to_numpy(), df["volume"].to_numpy()
+    ds = np.r_[0, np.flatnonzero(np.diff(t // 86400)) + 1, len(t)]
+    poc, vah, val = (np.full(len(t), np.nan) for _ in range(3))
+    for j in range(1, len(ds) - 1):
+        a, b = ds[max(0, j - p)], ds[j]
+        lo, hi = l[a:b].min(), h[a:b].max()
+        if hi <= lo:
+            continue
+        w = (hi - lo) / bins
+        i0 = np.clip(((l[a:b] - lo) / w).astype(int), 0, bins - 1)
+        i1 = np.clip(((h[a:b] - lo) / w).astype(int), 0, bins - 1)
+        share = v[a:b] / (i1 - i0 + 1)
+        dd = np.zeros(bins + 1)
+        np.add.at(dd, i0, share)
+        np.add.at(dd, i1 + 1, -share)
+        prof = np.cumsum(dd)[:bins]
+        k = int(prof.argmax()); acc, lo_i, hi_i, tot = prof[k], k, k, prof.sum()
+        while acc < va * tot and (lo_i > 0 or hi_i < bins - 1):
+            up = prof[hi_i + 1] if hi_i < bins - 1 else -1.0
+            dn = prof[lo_i - 1] if lo_i > 0 else -1.0
+            if up >= dn: hi_i += 1; acc += up
+            else: lo_i -= 1; acc += dn
+        s, e = ds[j], ds[j + 1]
+        poc[s:e], vah[s:e], val[s:e] = lo + (k + .5) * w, lo + (hi_i + 1) * w, lo + lo_i * w
+    if len(_VP) > 8:
+        _VP.clear()
+    _VP[key] = (poc, vah, val)
+    return _VP[key]
+
+def _pattern(df, k):
+    o, h, l, c = df["open"], df["high"], df["low"], df["close"]
+    body, rng = (c - o).abs(), h - l
+    lo, up = np.minimum(o, c) - l, h - np.maximum(o, c)
+    po, pc = o.shift(), c.shift()
+    r = {"bull_candle": c > o, "bear_candle": c < o,
+         "bull_engulf": (c > o) & (pc < po) & (c >= po) & (o <= pc),
+         "bear_engulf": (c < o) & (pc > po) & (c <= po) & (o >= pc),
+         "hammer": (lo >= 2 * body) & (up <= 0.25 * rng) & (rng > 0),
+         "shooting_star": (up >= 2 * body) & (lo <= 0.25 * rng) & (rng > 0),
+         "doji": (rng > 0) & (body <= 0.1 * rng),
+         "inside_bar": (h < h.shift()) & (l > l.shift())}[k]
+    return r.astype(float)
+
+def ind(df, k, p, q=None):
     if k in ("open", "high", "low", "close", "volume"):
         return df[k].to_numpy()
     c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
+    p0 = p
     p = max(1, int(p or 14))
     if k == "ema": s = c.ewm(span=p, adjust=False).mean()
     elif k == "sma": s = c.rolling(p).mean()
@@ -87,6 +159,57 @@ def ind(df, k, p):
         day = df["t"] // 86400
         tp = (h + l + c) / 3
         s = (tp * v).groupby(day).cumsum() / v.groupby(day).cumsum()
+    elif k == "stoch":
+        s = 100 * (c - l.rolling(p).min()) / (h.rolling(p).max() - l.rolling(p).min()).replace(0, np.nan)
+    elif k == "cci":
+        tp = (h + l + c) / 3
+        dv = tp - tp.rolling(p).mean()
+        s = dv / (0.015 * dv.abs().rolling(p).mean().replace(0, np.nan))
+    elif k == "roc": s = c.pct_change(p) * 100
+    elif k in ("adx", "plus_di", "minus_di"):
+        up, dn = h.diff(), -l.diff()
+        a = _tr(df).ewm(alpha=1 / p, adjust=False).mean()
+        pdi = 100 * pd.Series(np.where((up > dn) & (up > 0), up, 0.0), index=df.index).ewm(alpha=1 / p, adjust=False).mean() / a
+        mdi = 100 * pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0), index=df.index).ewm(alpha=1 / p, adjust=False).mean() / a
+        s = pdi if k == "plus_di" else mdi if k == "minus_di" else (100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, np.nan)).ewm(alpha=1 / p, adjust=False).mean()
+    elif k == "supertrend":  # ATR multiplier 3; bullish when close > line
+        a = _tr(df).ewm(alpha=1 / p, adjust=False).mean()
+        mid = (h + l) / 2
+        ub, lb, cl = (mid + 3 * a).to_numpy(), (mid - 3 * a).to_numpy(), c.to_numpy()
+        fu, fl, st, up = ub.copy(), lb.copy(), np.full(len(cl), np.nan), True
+        for i in range(1, len(cl)):
+            fu[i] = ub[i] if (ub[i] < fu[i - 1] or cl[i - 1] > fu[i - 1]) else fu[i - 1]
+            fl[i] = lb[i] if (lb[i] > fl[i - 1] or cl[i - 1] < fl[i - 1]) else fl[i - 1]
+            if up and cl[i] < fl[i]: up = False
+            elif not up and cl[i] > fu[i]: up = True
+            st[i] = fl[i] if up else fu[i]
+        s = pd.Series(st)
+    elif k in ("prev_high", "prev_low", "prev_close"): s = df[k[5:]].shift(1)
+    elif k in ("pd_high", "pd_low", "pd_close"):
+        day = df["t"] // 86400
+        dv = df.groupby(day)[k[3:]].agg({"pd_high": "max", "pd_low": "min", "pd_close": "last"}[k])
+        s = day.map(dv.shift(1))
+    elif k == "body_pct": s = (c - df["open"]).abs() / df["open"] * 100
+    elif k == "range_pct": s = (h - l) / df["open"] * 100
+    elif k in PATTERNS: s = _pattern(df, k)
+    elif k in ("or_high", "or_low"):  # opening range: p = minutes, q = start hour (UTC, decimal)
+        day = df["t"] // 86400
+        ws = day * 86400 + float(q or 0) * 3600
+        we = ws + (p0 or 30) * 60
+        ob = (h if k == "or_high" else l).where((df["t"] >= ws) & (df["t"] < we))
+        s = ob.groupby(day).transform("max" if k == "or_high" else "min").where(df["t"] >= we)
+    elif k in ("vp_poc", "vp_vah", "vp_val"):  # previous p days' volume profile
+        s = pd.Series(_vp(df, min(p, 30))[("vp_poc", "vp_vah", "vp_val").index(k)], index=df.index)
+    elif k == "day_open": s = df["open"].groupby(df["t"] // 86400).transform("first")
+    elif k in ("day_high", "day_low"):  # today's high/low so far, excluding the current candle
+        g = (h if k == "day_high" else l).groupby(df["t"] // 86400)
+        s = (g.cummax() if k == "day_high" else g.cummin()).groupby(df["t"] // 86400).shift(1)
+    elif k in ("pw_high", "pw_low"):
+        wk = (df["t"] // 86400 + 3) // 7
+        dv = df.groupby(wk)[k[3:]].agg("max" if k == "pw_high" else "min")
+        s = wk.map(dv.shift(1))
+    elif k == "hour": s = ((df["t"] % 86400) // 3600).astype(float)
+    elif k == "dow": s = ((df["t"] // 86400 + 3) % 7).astype(float)
     else:
         raise ValueError(f"unknown indicator {k}")
     return s.to_numpy()
@@ -94,9 +217,9 @@ def ind(df, k, p):
 def val(df, o, cache):
     if o["k"] == "num":
         return np.full(len(df), float(o["v"]))
-    key = (o["k"], o.get("p"))
+    key = (o["k"], o.get("p"), o.get("q"))
     if key not in cache:
-        cache[key] = ind(df, o["k"], o.get("p"))
+        cache[key] = ind(df, o["k"], o.get("p"), o.get("q"))
     return cache[key]
 
 def rule(df, r, cache):
@@ -312,6 +435,301 @@ def api_mc(q: MCReq):
                            med_dd=round(float(np.median(dd)), 2), worst_dd=round(float(np.percentile(dd, 5)), 2),
                            ruin=round(float((dd <= -q.ruin_pct).mean() * 100), 1),
                            actual_ret=round(float((act[-1] / cap0 - 1) * 100), 2), actual_dd=round(adn, 2)))
+
+# ---------------- chat -> strategy ----------------
+DEFAULT_P = {"ema": 20, "sma": 20, "rsi": 14, "atr": 14, "adx": 14, "plus_di": 14, "minus_di": 14, "stoch": 14, "cci": 20,
+             "roc": 10, "supertrend": 10, "bb_up": 20, "bb_lo": 20, "hh": 20, "ll": 20, "vol_sma": 20}
+ALIAS = [("previous day high", "pd_high"), ("previous day low", "pd_low"), ("previous day close", "pd_close"),
+         ("prev day high", "pd_high"), ("prev day low", "pd_low"), ("prev day close", "pd_close"),
+         ("yesterday high", "pd_high"), ("yesterday low", "pd_low"), ("yesterday close", "pd_close"),
+         ("previous high", "prev_high"), ("previous low", "prev_low"), ("previous close", "prev_close"),
+         ("prev high", "prev_high"), ("prev low", "prev_low"), ("prev close", "prev_close"),
+         ("upper bollinger", "bb_up"), ("bollinger upper", "bb_up"), ("upper band", "bb_up"),
+         ("lower bollinger", "bb_lo"), ("bollinger lower", "bb_lo"), ("lower band", "bb_lo"),
+         ("macd signal", "macd_sig"), ("signal line", "macd_sig"), ("moving average", "sma"), ("volume sma", "vol_sma"),
+         ("stochastic", "stoch"), ("stoch", "stoch"), ("supertrend", "supertrend"), ("vwap", "vwap"), ("macd", "macd"),
+         ("ema", "ema"), ("sma", "sma"), ("rsi", "rsi"), ("atr", "atr"), ("adx", "adx"), ("cci", "cci"), ("roc", "roc"),
+         ("price", "close"), ("close", "close"), ("open", "open"), ("high", "high"), ("low", "low"),
+         ("volume", "volume"), ("hour", "hour"), ("hh", "hh"), ("ll", "ll")]
+DEFAULT_P.update({"vp_poc": 1, "vp_vah": 1, "vp_val": 1, "or_high": 30, "or_low": 30})
+ALIAS += [("opening range high", "or_high"), ("opening range low", "or_low"), ("orb high", "or_high"), ("orb low", "or_low"),
+          ("or high", "or_high"), ("or low", "or_low"), ("point of control", "vp_poc"), ("poc", "vp_poc"),
+          ("value area high", "vp_vah"), ("vah", "vp_vah"), ("value area low", "vp_val"), ("val", "vp_val"),
+          ("day open", "day_open"), ("today open", "day_open"), ("day high", "day_high"), ("today high", "day_high"),
+          ("day low", "day_low"), ("today low", "day_low"), ("previous week high", "pw_high"), ("previous week low", "pw_low"),
+          ("last week high", "pw_high"), ("last week low", "pw_low"), ("pw high", "pw_high"), ("pw low", "pw_low")]
+ALIASD = dict(ALIAS)
+PHR = {"bullish engulfing": "bull_engulf", "bearish engulfing": "bear_engulf", "hammer": "hammer",
+       "shooting star": "shooting_star", "doji": "doji", "inside bar": "inside_bar", "bullish candle": "bull_candle",
+       "green candle": "bull_candle", "bearish candle": "bear_candle", "red candle": "bear_candle"}
+_ALT = "|".join(re.escape(a) for a, _ in sorted(ALIAS, key=lambda x: -len(x[0])))
+_OPD = r"(?:(?<![a-z_])(?:%s)(?![a-z_])|-?\d+(?:\.\d+)?)" % _ALT
+_OPR = (r"(?:(?:cross(?:es|ed|ing)?|break(?:s|ing)?)\s+(?:above|over|up(?:\s+through)?|upwards?|out above)"
+        r"|(?:cross(?:es|ed|ing)?|break(?:s|ing)?)\s+(?:below|under|down(?:\s+through)?|downwards?)"
+        r"|(?:is\s+|goes\s+|closes\s+|close\s+|stays\s+)?(?:above|greater than|more than|higher than|over|>)"
+        r"|(?:is\s+|goes\s+|closes\s+|close\s+|stays\s+)?(?:below|less than|lower than|under|<))")
+_CL = re.compile(r"(?P<a>%s)(?:\s*\(?\s*(?P<ap>\d+)\s*\)?)?\s+(?P<op>%s)\s+(?P<b>%s)(?:\s*\(?\s*(?P<bp>\d+)\s*\)?)?" % (_OPD, _OPR, _OPD))
+_EL = re.compile(r"(?:\band\b|\bor\b|,)\s*(?P<op>%s)\s+(?P<b>%s)(?:\s*\(?\s*(?P<bp>\d+)\s*\)?)?" % (_OPR, _OPD))
+_MARK = re.compile(r"\b(exit|square off|close (?:the )?(?:long|short|position|trade)|entry|enter|buy|sell|short|long)\b")
+OPTXT = {">": "is above", "<": "is below", "x_up": "crosses above", "x_dn": "crosses below"}
+HELP = ("Mujhe koi rule samajh nahi aaya. Is tarah likho:\n"
+        "“long entry when ema 9 crosses above ema 21 and rsi 14 below 70; exit when rsi above 80; sl 1% tp 2%”\n"
+        "“short when close crosses below supertrend; 15m ethusdt”\n"
+        "“buy on bullish engulfing, trade only between 8 and 20 utc”\n"
+        "“close above opening range high; 15 min opening range from 13:30 utc” (5m timeframe ke saath)\n"
+        "“long when close crosses above poc and above previous day high” (volume profile: poc, vah, val)\n"
+        "“new strategy” likhne se sab reset hota hai, “add …” likhne se rule jud jata hai.")
+
+def ensure(st):
+    out = {g: {"logic": "AND", "rules": []} for g in GROUPS}
+    out.update({"direction": "long", "sl_pct": 1, "tp_pct": 2, "fee_pct": 0.05, "capital": 10000, "size_pct": 100, "leverage": 1})
+    for k, v in (st or {}).items():
+        if k in GROUPS:
+            if isinstance(v, dict):
+                out[k] = {"logic": "OR" if v.get("logic") == "OR" else "AND", "rules": list(v.get("rules") or [])}
+        else:
+            out[k] = v
+    return out
+
+def _co(o):
+    k = o["k"]
+    if k not in KIND_FLAG:
+        raise ValueError(f"unknown indicator {k}")
+    if k == "num":
+        return {"k": "num", "v": float(o["v"])}
+    if KIND_FLAG[k] == 3:
+        return {"k": k, "p": max(1, min(int(o.get("p") or 30), 1440)), "q": max(0.0, min(float(o.get("q") or 0), 23.99))}
+    return {"k": k, "p": max(1, min(int(o.get("p") or DEFAULT_P.get(k, 14)), 500))} if KIND_FLAG[k] == 1 else {"k": k}
+
+def clean_strategy(st, cur):
+    out, st = ensure(cur), st or {}
+    for g in GROUPS:
+        gg = st.get(g)
+        if isinstance(gg, dict):
+            rules = []
+            for r in gg.get("rules") or []:
+                if r["op"] not in OPTXT:
+                    raise ValueError(f"bad operator {r['op']}")
+                rules.append({"l": _co(r["l"]), "op": r["op"], "r": _co(r["r"])})
+            out[g] = {"logic": "OR" if gg.get("logic") == "OR" else "AND", "rules": rules}
+    if st.get("direction") in ("long", "short", "both"):
+        out["direction"] = st["direction"]
+    for k, hi in (("sl_pct", 100), ("tp_pct", 1000), ("fee_pct", 5), ("size_pct", 100), ("leverage", 100), ("capital", 1e9)):
+        if k in st:
+            out[k] = max(0.0, min(float(st[k]), hi))
+    return out
+
+def _dsc(o):
+    return f"{o['v']:g}" if o["k"] == "num" else o["k"].upper() + (f" {o['p']}" if "p" in o else "") + (f" @{o['q']:g}h UTC" if "q" in o else "")
+
+def _dg(g):
+    return (" OR " if g["logic"] == "OR" else " AND ").join(f"{_dsc(r['l'])} {OPTXT[r['op']]} {_dsc(r['r'])}" for r in g["rules"])
+
+def _opd(tok, per, ctx):
+    tok = tok.strip()
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", tok):
+        return {"k": "num", "v": float(tok)}
+    k = ALIASD[tok]
+    if KIND_FLAG[k] == 3:
+        return {"k": k, "p": ctx["or"][0], "q": ctx["or"][1]}
+    if k.startswith("vp_"):
+        return {"k": k, "p": ctx["vp"]}
+    return {"k": k, "p": int(per) if per else DEFAULT_P.get(k, 14)} if KIND_FLAG[k] == 1 else {"k": k}
+
+def _op(s):
+    if re.search(r"cross|break", s):
+        return "x_dn" if re.search(r"below|under|down", s) else "x_up"
+    return "<" if re.search(r"below|less|lower|under|<", s) else ">"
+
+def _prep(t):
+    t = t.replace("'s ", " ").replace("’s ", " ")
+    t = re.sub(r"(\d+)[- ]?(?:bar|candle|period|day)s?\s+high(?:est)?", r"hh \1", t)
+    t = re.sub(r"(\d+)[- ]?(?:bar|candle|period|day)s?\s+low(?:est)?", r"ll \1", t)
+    t = re.sub(r"highest high(?: of| over)?\s+(\d+)", r"hh \1", t)
+    t = re.sub(r"lowest low(?: of| over)?\s+(\d+)", r"ll \1", t)
+    t = re.sub(r"\b(ema|sma|rsi|atr|adx|cci|roc|stoch|supertrend)(\d+)", r"\1 \2", t)
+    t = re.sub(r"\b(\d+)[- ]?(ema|sma|rsi)\b", r"\2 \1", t)
+    return t.replace("%", " ").replace("≥", ">").replace("≤", "<")
+
+def basic_parse(msg, cur):
+    t = _prep(msg.lower())
+    st, changed, notes = ensure(cur), False, []
+    if re.search(r"\b(new strategy|reset|start over|from scratch|clear all)\b", t):
+        for g in GROUPS:
+            st[g] = {"logic": "AND", "rules": []}
+        changed = True
+    ctx = {"or": (30, 0.0), "vp": 1}
+    if re.search(r"opening range|\borb\b", t):
+        md = re.search(r"(\d+)\s*(?:min(?:ute)?s?)\b", t)
+        ms = re.search(r"(?:from|at|starting|start)\s+(\d{1,2})(?::(\d\d))?\s*(utc|gmt|ist|et|est)?\b", t)
+        hr = 0.0
+        if ms:
+            hr = int(ms.group(1)) + int(ms.group(2) or 0) / 60 - (5.5 if ms.group(3) == "ist" else -5 if ms.group(3) in ("et", "est") else 0)
+        ctx["or"] = (int(md.group(1)) if md else 30, round(hr % 24, 2))
+        notes.append(f"Opening range: {ctx['or'][0]} min from {int(ctx['or'][1])}:{round(ctx['or'][1] % 1 * 60):02d} UTC (use timeframe ≤ range length)")
+    mv = re.search(r"(?:last|past|previous|prev)\s+(\d+)\s+days?", t)
+    if mv:
+        ctx["vp"] = max(1, min(int(mv.group(1)), 30))
+    ev, spans = [], []
+    for m in _CL.finditer(t):
+        ev.append((m.start(), "c", m)); spans.append((m.start(), m.end()))
+    for ph, key in PHR.items():
+        for m in re.finditer(re.escape(ph), t):
+            ev.append((m.start(), "p", key)); spans.append((m.start(), m.end()))
+    for m in _EL.finditer(t):  # "... and below X": reuse the previous left operand
+        if not any(a <= m.start() < b or m.start() <= a < m.end() for a, b in spans):
+            ev.append((m.start(), "e", m)); spans.append((m.start(), m.end()))
+    for m in _MARK.finditer(t):
+        if not any(a <= m.start() < b for a, b in spans):
+            ev.append((m.start(), "m", m.group(1)))
+    for m in re.finditer(r"[.;\n](?!\d)", t):
+        ev.append((m.start(), "b", None))
+    ev.sort(key=lambda e: e[0])
+    new, side, ex, last = {g: [] for g in GROUPS}, "long", False, None
+    for pos, kd, v in ev:
+        if kd == "m":
+            sd = "short" if v in ("short", "sell") or v.endswith("short") else "long" if v in ("long", "buy") or v.endswith("long") else None
+            if t[max(0, pos - 4):pos] == "for " and last and sd:  # "... for short" -> move previous rule
+                g0, r0 = last
+                new[g0].remove(r0)
+                last = (f"{g0.split('_')[0]}_{sd}", r0)
+                new[last[0]].append(r0)
+            elif v.startswith(("exit", "square", "close")):
+                ex, side = True, sd or side
+            elif v in ("entry", "enter"):
+                ex = False
+            else:
+                side = sd or side
+                ex = False if v in ("buy", "sell") else ex
+        elif kd == "b":
+            ex = False
+        elif kd == "e":
+            if last:
+                r0 = {"l": dict(last[1]["l"]), "op": _op(v["op"]), "r": _opd(v["b"], v["bp"], ctx)}
+                new[last[0]].append(r0)
+                last = (last[0], r0)
+        else:
+            g = f"{'exit' if ex else 'entry'}_{side}"
+            r0 = ({"l": _opd(v["a"], v["ap"], ctx), "op": _op(v["op"]), "r": _opd(v["b"], v["bp"], ctx)} if kd == "c"
+                  else {"l": {"k": v}, "op": ">", "r": {"k": "num", "v": 0.5}})
+            new[g].append(r0)
+            last = (g, r0)
+    use_or = bool(re.search(r"\bor\b", t)) and not re.search(r"\band\b", t)
+    add = bool(re.search(r"\b(add|also|plus|additionally)\b", t))
+    label = {"entry_long": "Long entry", "exit_long": "Long exit", "entry_short": "Short entry", "exit_short": "Short exit"}
+    for g in GROUPS:
+        if new[g]:
+            st[g] = {"logic": "OR" if use_or else "AND", "rules": (st[g]["rules"] if add else []) + new[g]}
+            notes.append(f"{label[g]}: {_dg(st[g])}"); changed = True
+    tm = re.search(r"(?:between|from)\s+(\d{1,2})(?::\d\d)?\s*(?:and|to|-)\s*(\d{1,2})(?::\d\d)?\s*(?:utc|gmt|hours?|hrs?|session)", t)
+    if tm:
+        a, b = int(tm.group(1)), int(tm.group(2))
+        for g in ("entry_long", "entry_short"):
+            if st[g]["rules"] and st[g]["logic"] == "AND" and not any(r["l"]["k"] == "hour" for r in st[g]["rules"]):
+                st[g]["rules"] += [{"l": {"k": "hour"}, "op": ">", "r": {"k": "num", "v": a - 0.5}},
+                                   {"l": {"k": "hour"}, "op": "<", "r": {"k": "num", "v": b - 0.5}}]
+        notes.append(f"Trade only {a}:00–{b}:00 UTC"); changed = True
+    d = None
+    if re.search(r"(long only|only long|buy only|only buy)", t): d = "long"
+    elif re.search(r"(short only|only short|sell only|only sell)", t): d = "short"
+    elif re.search(r"\b(both|long and short|long/short|long \+ short|both sides)\b", t): d = "both"
+    elif new["entry_long"] or new["entry_short"]:
+        hl, hs = bool(st["entry_long"]["rules"]), bool(st["entry_short"]["rules"])
+        d = "both" if hl and hs else "short" if hs else "long"
+    if d and d != st["direction"]:
+        st["direction"] = d; notes.append(f"Direction: {d}"); changed = True
+    num = lambda p: (lambda m: float(m.group(1)) if m else None)(re.search(p, t))
+    for key, off, pat, nm in (("sl_pct", r"(?:no|without|remove|disable)\s+(?:the\s+)?(?:sl|stop ?loss)", r"(?:\bsl\b|stop ?loss)\D{0,15}?(\d+(?:\.\d+)?)", "SL"),
+                              ("tp_pct", r"(?:no|without|remove|disable)\s+(?:the\s+)?(?:tp|take ?profit|target)", r"(?:\btp\b|take ?profit|target)\D{0,15}?(\d+(?:\.\d+)?)", "TP")):
+        if re.search(off, t): st[key] = 0; notes.append(f"{nm}: off"); changed = True
+        elif num(pat) is not None: st[key] = num(pat); notes.append(f"{nm}: {st[key]:g}%"); changed = True
+    rr = re.search(r"\b(?:rr|risk[ -]?reward)\D{0,6}(\d+(?:\.\d+)?)(?:\s*[:/]\s*(\d+(?:\.\d+)?))?", t)
+    if rr and st["sl_pct"]:
+        st["tp_pct"] = round(st["sl_pct"] * (float(rr.group(2)) / float(rr.group(1)) if rr.group(2) else float(rr.group(1))), 3)
+        notes.append(f"TP: {st['tp_pct']:g}% (risk-reward)"); changed = True
+    for key, pat, nm in (("fee_pct", r"(?:fees?|commission)\D{0,15}?(\d+(?:\.\d+)?)", "Fee"), ("capital", r"(?:capital|balance)\D{0,15}?(\d+(?:\.\d+)?)", "Capital"),
+                         ("size_pct", r"(?:position size|size)\D{0,15}?(\d+(?:\.\d+)?)", "Size")):
+        if num(pat) is not None: st[key] = num(pat); notes.append(f"{nm}: {st[key]:g}"); changed = True
+    lv = re.search(r"leverage\D{0,10}?(\d+)|\b(\d+)\s*x\b", t)
+    if lv: st["leverage"] = float(lv.group(1) or lv.group(2)); notes.append(f"Leverage: {st['leverage']:g}x"); changed = True
+    sym = iv = None
+    ms = re.search(r"\b([a-z0-9]{2,10}(?:usdt|usdc|btc))\b", t)
+    coins = {"btc": "BTCUSDT", "bitcoin": "BTCUSDT", "eth": "ETHUSDT", "ethereum": "ETHUSDT", "sol": "SOLUSDT", "solana": "SOLUSDT",
+             "bnb": "BNBUSDT", "xrp": "XRPUSDT", "doge": "DOGEUSDT"}
+    mc = re.search(r"\b(btc|bitcoin|eth|ethereum|sol|solana|bnb|xrp|doge)\b", t)
+    sym = ms.group(1).upper() if ms else coins[mc.group(1)] if mc else None
+    mi = re.search(r"\b(1m|3m|5m|15m|30m|1h|2h|4h|1d)\b", t)
+    iv = mi.group(1) if mi else "1d" if "daily" in t else "1h" if "hourly" in t else None
+    if sym: notes.append(f"Symbol: {sym}"); changed = True
+    if iv: notes.append(f"Timeframe: {iv}"); changed = True
+    reply = ("Done ✅\n" + "\n".join(notes) + "\nRules left side mein dekh lo, backtest chal raha hai.") if changed else HELP
+    return dict(reply=reply, strategy=st, symbol=sym, interval=iv, changed=changed, mode="basic")
+
+_AI_CALLS = []
+
+def _ai_ok():
+    now = time.time()
+    _AI_CALLS[:] = [x for x in _AI_CALLS if now - x < 3600]
+    if len(_AI_CALLS) >= 40:
+        return False
+    _AI_CALLS.append(now)
+    return True
+
+def _ai_sys():
+    cat = "; ".join(f"{g}: " + ", ".join(k + ("(p)" if v == 1 else "(p,q)" if v == 3 else "") for k, v in d.items()) for g, d in CATALOG.items())
+    return ("You convert a trader's plain-language request into a strategy JSON for a backtesting app. Return ONLY one JSON object, no markdown: "
+            '{"reply": short friendly explanation in the user\'s language (Hinglish is fine), "symbol": Binance pair like BTCUSDT or null, '
+            '"interval": one of 1m,3m,5m,15m,30m,1h,2h,4h,1d or null, "strategy": the FULL updated strategy}. '
+            'Strategy keys: direction (long|short|both); entry_long, exit_long, entry_short, exit_short, each {"logic":"AND"|"OR","rules":[{"l":operand,"op":op,"r":operand}]}; '
+            'sl_pct and tp_pct (percent, 0=off); fee_pct; size_pct; leverage; capital. Operand: {"k":kind,"p":period} (p only for kinds marked (p)) or {"k":"num","v":number}. '
+            'op is one of ">", "<", "x_up" (crosses above), "x_dn" (crosses below). Available kinds - ' + cat + ". "
+            'Candle patterns (bull_candle, bear_candle, bull_engulf, bear_engulf, hammer, shooting_star, doji, inside_bar) are 1/0 series: use {"l":{"k":"hammer"},"op":">","r":{"k":"num","v":0.5}}. '
+            "hour is the UTC hour 0-23 (hours 8 to 19 means hour > 7.5 AND hour < 19.5); dow 0=Monday. pd_* are previous UTC day values, prev_* the previous candle; "
+            "hh/ll are the highest high / lowest low of the previous p candles (breakout: close > hh). supertrend is bullish when close > supertrend. "
+            "or_high/or_low = opening range high/low: p = range length in minutes, q = start hour in UTC (decimal, e.g. 13.5 = 13:30; 9:15 IST = 3.75); valid only after the range completes each UTC day; the timeframe should not be larger than p. "
+            "vp_poc/vp_vah/vp_val = point of control / value-area high / value-area low (70%) of the volume profile built from the previous p days. day_open/day_high/day_low are today's values so far; pw_* previous week. "
+            "Entries fill at the next candle open. When the user asks to change or add something, keep the rest of the current strategy; if they ask for a new strategy, replace everything. "
+            "Exits are optional (SL/TP can be the only exit). If something cannot be expressed with these kinds, use the closest and say so in reply.")
+
+def ai_chat(msg, cur, sym, tf, key):
+    r = requests.post("https://api.anthropic.com/v1/messages", timeout=45,
+                      headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                      json={"model": os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5-5"), "max_tokens": 1500, "system": _ai_sys(),
+                            "messages": [{"role": "user", "content": f"Current strategy JSON:\n{json.dumps(cur)}\nCurrent market: {sym} {tf}\n\nUser request: {msg}"}]})
+    r.raise_for_status()
+    txt = "".join(b.get("text", "") for b in r.json()["content"])
+    j = json.loads(txt[txt.index("{"):txt.rindex("}") + 1])
+    s = str(j.get("symbol") or "").upper()
+    return dict(reply=str(j.get("reply", ""))[:700], strategy=clean_strategy(j["strategy"], cur),
+                symbol=s if re.fullmatch(r"[A-Z0-9]{5,20}", s) else None,
+                interval=j.get("interval") if j.get("interval") in TF else None, changed=True, mode="ai")
+
+class ChatReq(BaseModel):
+    message: str
+    strategy: dict = {}
+    symbol: str = ""
+    interval: str = ""
+
+@app.post("/api/chat")
+def api_chat(q: ChatReq):
+    msg = q.message.strip()[:1000]
+    if not msg:
+        raise HTTPException(400, "Empty message")
+    cur, key, note = ensure(q.strategy), os.environ.get("ANTHROPIC_API_KEY"), ""
+    if key:
+        if _ai_ok():
+            try:
+                return ai_chat(msg, cur, q.symbol, q.interval, key)
+            except Exception as e:
+                note = f"(AI error: {str(e)[:80]} — basic parser use hua)\n"
+        else:
+            note = "(AI hourly limit reached — basic parser use hua)\n"
+    try:
+        out = basic_parse(msg, cur)
+    except Exception as e:
+        raise HTTPException(400, f"Could not understand: {e!r}")
+    out["reply"] = note + out["reply"]
+    return out
 
 @app.get("/")
 def index():
