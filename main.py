@@ -318,7 +318,20 @@ def backtest(df, s):
         equity[-1] = eq
     return equity, trades, cap0
 
+def _streak(trades, win):
+    """Longest run of consecutive winning (or losing) trades and the P&L of that run."""
+    best, cur, tot = (0, 0.0), 0, 0.0
+    for x in trades:
+        if (x["pnl"] > 0) == win:
+            cur, tot = cur + 1, tot + x["pnl"]
+            if cur > best[0]:
+                best = (cur, tot)
+        else:
+            cur, tot = 0, 0.0
+    return best
+
 def metrics(df, equity, trades, tf, cap0):
+    (mws, mws_pnl), (mls, mls_pnl) = _streak(trades, True), _streak(trades, False)
     r = np.diff(equity) / np.where(equity[:-1] == 0, np.nan, equity[:-1])
     sd = np.nanstd(r)
     sharpe = float(np.nanmean(r) / sd * math.sqrt(525600 / TF[tf])) if sd > 0 else 0.0
@@ -336,7 +349,7 @@ def metrics(df, equity, trades, tf, cap0):
                 dd=round(dd, 2), win=round(len(w) / len(trades) * 100, 1) if trades else 0.0,
                 pf=round(min(pf, 999.0), 2), sharpe=round(sharpe, 2), trades=len(trades),
                 avg=round(float(np.mean([x["pct"] for x in trades])), 3) if trades else 0.0,
-                final=round(float(equity[-1]), 2), rr=round(rr, 2), aw=round(aw, 2), al=round(al, 2), nw=len(w))
+                final=round(float(equity[-1]), 2), rr=round(rr, 2), aw=round(aw, 2), al=round(al, 2), nw=len(w), mws=mws, mws_pnl=round(mws_pnl, 2), mls=mls, mls_pnl=round(mls_pnl, 2))
 
 # ---------------- api ----------------
 class Req(BaseModel):
