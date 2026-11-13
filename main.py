@@ -251,16 +251,22 @@ def backtest(df, s):
     size = float(s.get("size_pct") or 100) / 100 * float(s.get("leverage") or 1)
     eq, pos, ent, qty, ei = cap0, 0, 0.0, 0.0, 0
     eq0 = cap0
+    entry_break, sl_candle = s.get("entry_mode") == "break", s.get("sl_mode") == "candle"
+    rr = float(s.get("rr") or 1)
+    stop_tp, max_td = bool(s.get("stop_after_tp")), int(s.get("max_trades_day") or 0)
+    blocked, tcount, sl_px, tp_px = -1, {}, None, None
     equity, trades = np.full(n, cap0), []
 
     def close(i, px, why):
-        nonlocal eq, pos
+        nonlocal eq, pos, blocked
         gross = pos * qty * (px - ent)
         eq += gross - fee * qty * px
         pnl = gross - fee * qty * (ent + px)
         trades.append(dict(side="long" if pos > 0 else "short", t0=int(t[ei]), t1=int(t[i]),
                            entry=float(ent), exit=float(px), pnl=float(pnl), pct=float(pnl / (qty * ent) * 100), ret=float(pnl / eq0), why=why))
         pos = 0
+        if why == "tp" and stop_tp:
+            blocked = int(t[i] // 86400)
 
     for i in range(1, n):
         if eq <= 0:
@@ -269,23 +275,43 @@ def backtest(df, s):
         el, es, xl, xs = sig["entry_long"], sig["entry_short"], sig["exit_long"], sig["exit_short"]
         wl = el is not None and mode in ("long", "both") and bool(el[i - 1])
         ws = es is not None and mode in ("short", "both") and bool(es[i - 1])
-        if pos > 0 and ((xl is not None and xl[i - 1]) or (ws and not wl)):
+        rev = not entry_break
+        if pos > 0 and ((xl is not None and xl[i - 1]) or (rev and ws and not wl)):
             close(i, o[i], "signal")
-        elif pos < 0 and ((xs is not None and xs[i - 1]) or (wl and not ws)):
+        elif pos < 0 and ((xs is not None and xs[i - 1]) or (rev and wl and not ws)):
             close(i, o[i], "signal")
-        if pos == 0 and (wl or ws):
-            pos, ent, ei = (1 if wl else -1), o[i], i
-            eq0 = eq
-            qty = eq * size / ent
-            eq -= fee * qty * ent
+        day = int(t[i] // 86400)
+        if pos == 0 and (wl or ws) and day != blocked and not (max_td and tcount.get(day, 0) >= max_td):
+            side, px = 0, o[i]
+            if not entry_break:
+                side = 1 if wl else -1
+            elif wl and h[i] > h[i - 1]:      # long: next candle breaks the signal candle high
+                side, px = 1, max(o[i], h[i - 1])
+            elif ws and l[i] < l[i - 1]:      # short: next candle breaks the signal candle low
+                side, px = -1, min(o[i], l[i - 1])
+            if side:
+                if sl_candle:
+                    sl_px = l[i - 1] if side > 0 else h[i - 1]
+                    if abs(px - sl_px) <= 0:
+                        side = 0
+                    else:
+                        tp_px = px + side * rr * abs(px - sl_px)
+                else:
+                    sl_px = px * (1 - side * sl) if sl else None
+                    tp_px = px * (1 + side * tp) if tp else None
+            if side:
+                pos, ent, ei = side, px, i
+                tcount[day] = tcount.get(day, 0) + 1
+                eq0 = eq
+                qty = eq * size / ent
+                eq -= fee * qty * ent
         if pos:
-            slp, tpp = ent * (1 - pos * sl), ent * (1 + pos * tp)
             if pos > 0:
-                if sl and l[i] <= slp: close(i, min(slp, o[i]), "sl")
-                elif tp and h[i] >= tpp: close(i, max(tpp, o[i]), "tp")
+                if sl_px is not None and l[i] <= sl_px: close(i, min(sl_px, o[i]), "sl")
+                elif tp_px is not None and h[i] >= tp_px: close(i, max(tp_px, o[i]), "tp")
             else:
-                if sl and h[i] >= slp: close(i, max(slp, o[i]), "sl")
-                elif tp and l[i] <= tpp: close(i, min(tpp, o[i]), "tp")
+                if sl_px is not None and h[i] >= sl_px: close(i, max(sl_px, o[i]), "sl")
+                elif tp_px is not None and l[i] <= tp_px: close(i, min(tp_px, o[i]), "tp")
         equity[i] = eq + (pos * qty * (c[i] - ent) if pos else 0)
     if pos:
         close(n - 1, c[n - 1], "end")
@@ -478,6 +504,7 @@ HELP = ("Mujhe koi rule samajh nahi aaya. Is tarah likho:\n"
         "“buy on bullish engulfing, trade only between 8 and 20 utc”\n"
         "“close above opening range high; 15 min opening range from 13:30 utc” (5m timeframe ke saath)\n"
         "“long when close crosses above poc and above previous day high” (volume profile: poc, vah, val)\n"
+        "“long when green candle and close below vwap, enter on break of signal candle, sl at signal candle, rr 1:1, stop trading for the day after first target” (candle-based SL/RR)\n"
         "“new strategy” likhne se sab reset hota hai, “add …” likhne se rule jud jata hai.")
 
 def ensure(st):
@@ -514,6 +541,11 @@ def clean_strategy(st, cur):
             out[g] = {"logic": "OR" if gg.get("logic") == "OR" else "AND", "rules": rules}
     if st.get("direction") in ("long", "short", "both"):
         out["direction"] = st["direction"]
+    if st.get("sl_mode") in ("pct", "candle"): out["sl_mode"] = st["sl_mode"]
+    if st.get("entry_mode") in ("next_open", "break"): out["entry_mode"] = st["entry_mode"]
+    if "rr" in st: out["rr"] = max(0.1, min(float(st["rr"]), 20.0))
+    if "stop_after_tp" in st: out["stop_after_tp"] = bool(st["stop_after_tp"])
+    if "max_trades_day" in st: out["max_trades_day"] = max(0, min(int(st["max_trades_day"]), 100))
     for k, hi in (("sl_pct", 100), ("tp_pct", 1000), ("fee_pct", 5), ("size_pct", 100), ("leverage", 100), ("capital", 1e9)):
         if k in st:
             out[k] = max(0.0, min(float(st[k]), hi))
@@ -557,6 +589,8 @@ def basic_parse(msg, cur):
     if re.search(r"\b(new strategy|reset|start over|from scratch|clear all)\b", t):
         for g in GROUPS:
             st[g] = {"logic": "AND", "rules": []}
+        for k in ("sl_mode", "entry_mode", "rr", "stop_after_tp", "max_trades_day"):
+            st.pop(k, None)
         changed = True
     ctx = {"or": (30, 0.0), "vp": 1}
     if re.search(r"opening range|\borb\b", t):
@@ -638,13 +672,27 @@ def basic_parse(msg, cur):
         d = "both" if hl and hs else "short" if hs else "long"
     if d and d != st["direction"]:
         st["direction"] = d; notes.append(f"Direction: {d}"); changed = True
+    spec = (("sl_mode", "candle", r"(?:sl|stop ?loss)\s+(?:at|below|above|on)\s+(?:the\s+)?(?:signal|setup|entry|trigger)\s+candle", "Stop-loss: signal candle low (long) / high (short)"),
+            ("entry_mode", "break", r"(?:enter|entry)?\s*(?:on\s+)?break(?:out)?\s+of\s+(?:the\s+)?(?:signal|setup)\s+candle", "Entry: when the next candle breaks the signal candle high (long) / low (short)"),
+            ("stop_after_tp", True, r"stop\w*\s+(?:trading\s+)?(?:for\s+the\s+day\s+)?after\s+(?:the\s+)?(?:first\s+|1\s+|one\s+)?(?:tp|target)", "Stop trading for the day after a take-profit"))
+    for key, val, pat, note in spec:
+        if re.search(pat, t):
+            st[key] = val; notes.append(note); changed = True
+            t = re.sub(pat, " ", t)
+    mt = re.search(r"max(?:imum)?\s+(\d+)\s+trades?\s+(?:per|a|each)\s+day", t)
+    if mt:
+        st["max_trades_day"] = int(mt.group(1)); notes.append(f"Max trades per day: {mt.group(1)}"); changed = True
+        t = t.replace(mt.group(0), " ")
     num = lambda p: (lambda m: float(m.group(1)) if m else None)(re.search(p, t))
     for key, off, pat, nm in (("sl_pct", r"(?:no|without|remove|disable)\s+(?:the\s+)?(?:sl|stop ?loss)", r"(?:\bsl\b|stop ?loss)\D{0,15}?(\d+(?:\.\d+)?)", "SL"),
                               ("tp_pct", r"(?:no|without|remove|disable)\s+(?:the\s+)?(?:tp|take ?profit|target)", r"(?:\btp\b|take ?profit|target)\D{0,15}?(\d+(?:\.\d+)?)", "TP")):
         if re.search(off, t): st[key] = 0; notes.append(f"{nm}: off"); changed = True
         elif num(pat) is not None: st[key] = num(pat); notes.append(f"{nm}: {st[key]:g}%"); changed = True
     rr = re.search(r"\b(?:rr|risk[ -]?reward)\D{0,6}(\d+(?:\.\d+)?)(?:\s*[:/]\s*(\d+(?:\.\d+)?))?", t)
-    if rr and st["sl_pct"]:
+    if rr and st.get("sl_mode") == "candle":
+        st["rr"] = float(rr.group(2)) / float(rr.group(1)) if rr.group(2) else float(rr.group(1))
+        notes.append(f"Risk-reward: 1:{st['rr']:g}"); changed = True
+    elif rr and st["sl_pct"]:
         st["tp_pct"] = round(st["sl_pct"] * (float(rr.group(2)) / float(rr.group(1)) if rr.group(2) else float(rr.group(1))), 3)
         notes.append(f"TP: {st['tp_pct']:g}% (risk-reward)"); changed = True
     for key, pat, nm in (("fee_pct", r"(?:fees?|commission)\D{0,15}?(\d+(?:\.\d+)?)", "Fee"), ("capital", r"(?:capital|balance)\D{0,15}?(\d+(?:\.\d+)?)", "Capital"),
@@ -681,7 +729,7 @@ def _ai_sys():
             '{"reply": short friendly explanation in the user\'s language (Hinglish is fine), "symbol": Binance pair like BTCUSDT or null, '
             '"interval": one of 1m,3m,5m,15m,30m,1h,2h,4h,1d or null, "strategy": the FULL updated strategy}. '
             'Strategy keys: direction (long|short|both); entry_long, exit_long, entry_short, exit_short, each {"logic":"AND"|"OR","rules":[{"l":operand,"op":op,"r":operand}]}; '
-            'sl_pct and tp_pct (percent, 0=off); fee_pct; size_pct; leverage; capital. Operand: {"k":kind,"p":period} (p only for kinds marked (p)) or {"k":"num","v":number}. '
+            'sl_pct and tp_pct (percent, 0=off); fee_pct; size_pct; leverage; capital; optional sl_mode (pct or candle: stop at the signal candle low for longs and high for shorts), rr (take-profit = rr x risk when sl_mode is candle), entry_mode (next_open or break: enter when the candle after the signal candle breaks its high for longs and low for shorts), stop_after_tp (true: no more trades that UTC day after a take-profit), max_trades_day (0=off). Operand: {"k":kind,"p":period} (p only for kinds marked (p)) or {"k":"num","v":number}. '
             'op is one of ">", "<", "x_up" (crosses above), "x_dn" (crosses below). Available kinds - ' + cat + ". "
             'Candle patterns (bull_candle, bear_candle, bull_engulf, bear_engulf, hammer, shooting_star, doji, inside_bar) are 1/0 series: use {"l":{"k":"hammer"},"op":">","r":{"k":"num","v":0.5}}. '
             "hour is the UTC hour 0-23 (hours 8 to 19 means hour > 7.5 AND hour < 19.5); dow 0=Monday. pd_* are previous UTC day values, prev_* the previous candle; "
