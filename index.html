@@ -43,7 +43,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:5px 8px;b
 <h3>Monte Carlo</h3>
 <div class=row><input id=mcn type=number value=1000 title="Simulations"><select id=mcm><option value=bootstrap>Resample trades</option><option value=shuffle>Shuffle order</option></select><button onclick="mc()">Run Monte Carlo</button></div>
 <div class=row style="margin-top:14px"><button class=pri onclick="run()">Run backtest</button><button onclick="opt()">Optimize</button></div><div id=msg></div></aside>
-<main><div class=cards id=cards></div><div class=row id=ctb></div><div class=row id=leg></div><div class=ch id=pc></div><div id=osc></div><div class=ch id=ec style="height:220px"></div>
+<main><div class=cards id=cards></div><div class=row id=ctb></div><div class=row id=leg></div><div id=gxi class=sub style="margin:2px 0 6px"></div><div class=ch id=pc></div><div id=osc></div><div class=ch id=ec style="height:220px"></div>
 <div id=mcres></div><div id=ores></div><h2>Trades</h2><div class=box id=T></div></main>
 <script>
 const $=id=>document.getElementById(id);
@@ -164,7 +164,7 @@ const NOADD=['num','close','open','high','low','volume','hour','dow','vol_sma',.
 let OV=[],OC=[],LASTC=null;
 pc.timeScale().subscribeVisibleLogicalRangeChanged(r=>{if(r)OC.forEach(c=>c.timeScale().setVisibleLogicalRange(r))});
 function ctbRender(){const tf=$('tf').value;
- $('ctb').innerHTML=['1m','5m','15m','1h','4h','1d'].map(x=>`<button class="${x===tf?'on':''}" onclick="setTf('${x}')">${x}</button>`).join('')+'<span style="width:6px"></span>'+[['1D',1],['1W',7],['1M',30],['3M',90],['All',0]].map(([l,d])=>`<button onclick="zoomR(${d})">${l}</button>`).join('')+'<span class=sub>UTC</span><select id=ix>'+Object.keys(KINDS).filter(k=>!NOADD.includes(k)).map(k=>`<option>${k}</option>`).join('')+'</select><input id=ip type=number value=20 style="width:62px" title="period (minutes for opening range)"><button onclick="addInd()">+ Indicator</button>'}
+ $('ctb').innerHTML=['1m','5m','15m','1h','4h','1d'].map(x=>`<button class="${x===tf?'on':''}" onclick="setTf('${x}')">${x}</button>`).join('')+'<span style="width:6px"></span>'+[['1D',1],['1W',7],['1M',30],['3M',90],['All',0]].map(([l,d])=>`<button onclick="zoomR(${d})">${l}</button>`).join('')+`<button class="${GXON?'on':''}" onclick="toggleGex()">GEX</button><select onchange="gexDays(this.value)">${[1,3,7,30,90].map(d=>`<option value=${d} ${d===GXD?'selected':''}>${d===1?'≤1d (scalp)':'≤'+d+'d'}</option>`).join('')}</select>`+'<span class=sub>UTC</span><select id=ix>'+Object.keys(KINDS).filter(k=>!NOADD.includes(k)).map(k=>`<option>${k}</option>`).join('')+'</select><input id=ip type=number value=20 style="width:62px" title="period (minutes for opening range)"><button onclick="addInd()">+ Indicator</button>'}
 function setTf(x){$('tf').value=x;run()}
 function zoomR(d){if(!LASTC||!LASTC.length)return;const to=LASTC[LASTC.length-1].time;try{d?pc.timeScale().setVisibleRange({from:to-d*86400,to}):pc.timeScale().fitContent()}catch(e){pc.timeScale().fitContent()}}
 function addInd(){const k=$('ix').value,p=+$('ip').value;CX.push(KINDS[k]===3?{k,p:p||30,q:0}:KINDS[k]===1?{k,p:p||20}:{k});wr('quantlab_cx',CX);run()}
@@ -177,6 +177,19 @@ function drawOv(list){OV.forEach(o=>{try{o.chart.removeSeries(o.s)}catch(e){}});
   const s=ch.addLineSeries({color:col,lineWidth:1.5,priceLineVisible:false,lastValueVisible:false});s.setData(o.data);OV.push({s,chart:ch,col,on:true,label:o.label,k:o.k,p:o.p,q:o.q})});
  const seen=new Set();for(const g in GN)S[g].rules.forEach(r=>[[r.l,r.r],[r.r,r.l]].forEach(([a,b])=>{const pn=PANEJS[a.k];if(pn&&b.k==='num'&&panes[pn]&&!seen.has(pn+b.v)){seen.add(pn+b.v);OV.find(x=>x.chart===panes[pn]).s.createPriceLine({price:b.v,color:'#6b7a8d',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:''})}}));
  legRender();const r=pc.timeScale().getVisibleLogicalRange();if(r)OC.forEach(c=>c.timeScale().setVisibleLogicalRange(r))}
+let GXON=false,GXD=+rd('quantlab_gxd','30'),GXL=[];setInterval(()=>{if(GXON)gexLoad()},300000);
+function gxClear(){GXL.forEach(l=>{try{cs.removePriceLine(l)}catch(e){}});GXL=[];$('gxi').innerHTML=''}
+async function gexLoad(){const c=$('sym').value.toUpperCase().startsWith('BTC')?'BTC':$('sym').value.toUpperCase().startsWith('ETH')?'ETH':'';
+ if(!c){busy('GEX is available for BTC and ETH only');GXON=false;gxClear();ctbRender();return}
+ busy('Loading GEX from Deribit…');
+ try{const r=await fetch(`/api/gex?currency=${c}&days=${GXD}`),g=await r.json();if(!r.ok)throw new Error(g.detail||'GEX error');gxClear();
+  const L=(p,col,t)=>p?GXL.push(cs.createPriceLine({price:p,color:col,lineWidth:2,lineStyle:2,axisLabelVisible:true,title:t})):0;
+  const top=g.strikes.filter(x=>Math.abs(x.k/g.spot-1)<=0.08).sort((a,b)=>Math.abs(b.net)-Math.abs(a.net)).slice(0,6);top.slice(0,3).forEach(x=>GXL.push(cs.createPriceLine({price:x.k,color:'#64748b',lineWidth:1,lineStyle:1,axisLabelVisible:false,title:'γ '+(x.net>=0?'+':'')+x.net+'M'})));
+  L(g.call_wall,'#22c55e','Call wall');L(g.put_wall,'#ef4444','Put wall');L(g.flip,'#f59e0b','Gamma flip');
+  $('gxi').innerHTML=`<b>GEX</b> (Deribit ${c}, expiries ≤ ${g.days}d, ${g.asof}) · Spot ${g.spot} · <span class=pos>Call wall ${g.call_wall}</span> · <span class=neg>Put wall ${g.put_wall}</span> · <span style="color:#f59e0b">Gamma flip ${g.flip??'–'}</span> · Total ${g.total_gex_m>=0?'+':''}${g.total_gex_m}M per 1% (${g.regime} gamma)<br>Top gamma strikes (±8%): ${top.sort((a,b)=>b.k-a.k).map(x=>`<span class="${x.net>=0?'pos':'neg'}">${x.k}: ${x.net>=0?'+':''}${x.net}M</span>`).join(' · ')||'–'}<br><span style="color:var(--m)">⚠ Live snapshot lines only — not historical GEX. Calls counted +, puts − (dealer assumption). Positive gamma tends to dampen moves, negative gamma to amplify them.</span>`;busy('')}
+ catch(e){busy('⚠ '+e.message);GXON=false;gxClear();ctbRender()}}
+function toggleGex(){GXON=!GXON;ctbRender();if(GXON)gexLoad();else gxClear()}
+function gexDays(v){GXD=+v;wr('quantlab_gxd',GXD);if(GXON)gexLoad()}
 $('pre').innerHTML=Object.keys(PRE).map(k=>`<option>${k}</option>`).join('');
 $('tf').innerHTML=['1m','3m','5m','15m','30m','1h','2h','4h','1d'].map(k=>`<option ${k==='1h'?'selected':''}>${k}</option>`).join('');
 usePreset(Object.keys(PRE)[0]);libRender();ctbRender();say('a','Hi! Apni strategy words mein likho, jaise: “long when ema 9 crosses above ema 21 and rsi below 70, exit when rsi above 80, sl 1% tp 2%”. Candle patterns (hammer, bullish engulfing), previous day high/low, opening range (“15 min opening range from 13:30 utc”), volume profile (poc, vah, val), supertrend, adx, stoch, time window (between 8 and 20 utc) sab chalte hain. “new strategy” se reset.');

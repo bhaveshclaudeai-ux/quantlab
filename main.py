@@ -1,4 +1,5 @@
 import copy, itertools, json, math, os, re, time
+from datetime import datetime, timezone
 import numpy as np, pandas as pd, requests
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -866,6 +867,74 @@ def api_chat(q: ChatReq):
     except Exception as e:
         raise HTTPException(400, f"Could not understand: {e!r}")
     out["reply"] = note + out["reply"]
+    return out
+
+# ---------------- GEX (gamma exposure) from Deribit options ----------------
+GEXC = {}
+
+def _gamma(S, K, sig, T):
+    d1 = (np.log(S / K) + 0.5 * sig * sig * T) / (sig * np.sqrt(T))
+    return np.exp(-0.5 * d1 * d1) / np.sqrt(2 * np.pi) / (S * sig * np.sqrt(T))
+
+@app.get("/api/gex")
+def api_gex(currency: str = "BTC", days: int = 30):
+    """Dealer gamma exposure per strike from Deribit open interest. Calls count +, puts count - (standard assumption)."""
+    cur, days = currency.upper(), max(1, min(days, 365))
+    if cur not in ("BTC", "ETH"):
+        raise HTTPException(400, "GEX is available for BTC and ETH only")
+    c = GEXC.get((cur, days))
+    if c and time.time() - c[0] < 300:
+        return c[1]
+    try:
+        r = requests.get("https://www.deribit.com/api/v2/public/get_book_summary_by_currency",
+                         params={"currency": cur, "kind": "option"}, timeout=25)
+        r.raise_for_status()
+        rows = r.json()["result"]
+    except Exception as e:
+        raise HTTPException(502, f"Deribit data error: {str(e)[:120]}")
+    now = datetime.now(timezone.utc)
+    K, T, IV, OI, SG, SP = [], [], [], [], [], []
+    for x in rows:
+        try:
+            _, ex, k, ty = x["instrument_name"].split("-")
+            exp = datetime.strptime(ex, "%d%b%y").replace(hour=8, tzinfo=timezone.utc)
+            t = (exp - now).total_seconds() / 31536000
+            iv, oi, sp = (x.get("mark_iv") or 0) / 100, x.get("open_interest") or 0, x.get("underlying_price")
+            if t <= 0 or t * 365 > days or iv <= 0 or oi <= 0 or not sp:
+                continue
+            K.append(float(k)); T.append(t); IV.append(iv); OI.append(float(oi)); SG.append(1.0 if ty == "C" else -1.0); SP.append(float(sp))
+        except Exception:
+            continue
+    if len(K) < 5:
+        raise HTTPException(502, "Not enough option data from Deribit for this range")
+    K, T, IV, OI, SG, SP = (np.array(a) for a in (K, T, IV, OI, SG, SP))
+    spot = float(np.median(SP[T <= T.min() * 1.5 + 1e-9]))
+
+    def gex(S):  # per-option dollar gamma per 1% move if the underlying were at S
+        f = SP * (S / spot)
+        return SG * _gamma(f, K, IV, T) * OI * S * S * 0.01
+
+    g0 = gex(spot)
+    strikes = sorted(set(K.tolist()))
+    call = {k: float(g0[(K == k) & (SG > 0)].sum()) for k in strikes}
+    put = {k: float(-g0[(K == k) & (SG < 0)].sum()) for k in strikes}  # magnitude
+    up = [k for k in strikes if k >= spot] or strikes
+    dn = [k for k in strikes if k <= spot] or strikes
+    call_wall, put_wall = max(up, key=lambda k: call[k]), max(dn, key=lambda k: put[k])
+    grid = spot * np.linspace(0.7, 1.3, 121)
+    tot = np.array([gex(s).sum() for s in grid])
+    flip = None
+    cross = [i for i in range(len(grid) - 1) if tot[i] == 0 or tot[i] * tot[i + 1] < 0]
+    if cross:
+        i = min(cross, key=lambda j: abs(grid[j] - spot))
+        flip = float(grid[i] - tot[i] * (grid[i + 1] - grid[i]) / (tot[i + 1] - tot[i])) if tot[i + 1] != tot[i] else float(grid[i])
+    total = float(g0.sum())
+    near = [k for k in strikes if 0.75 * spot <= k <= 1.25 * spot]
+    out = dict(currency=cur, spot=round(spot, 2), days=days, asof=now.strftime("%H:%M UTC"), call_wall=call_wall, put_wall=put_wall,
+               flip=None if flip is None else round(flip, 1), total_gex_m=round(total / 1e6, 2),
+               regime="positive" if total > 0 else "negative",
+               strikes=[dict(k=k, call=round(call[k] / 1e6, 3), put=round(put[k] / 1e6, 3), net=round((call[k] - put[k]) / 1e6, 3)) for k in near])
+    GEXC[(cur, days)] = (time.time(), out)
     return out
 
 @app.get("/")
