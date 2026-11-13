@@ -58,6 +58,37 @@ def load(sym, tf, n):
     CACHE[(sym, tf)] = (time.time(), df)
     return df.tail(n).reset_index(drop=True)
 
+def load_range(sym, tf, a, b, cap=20000):
+    """Candles between two dates (UTC, ms). Only the start -> end window, max 20,000 candles."""
+    tfms = TF[tf] * 60000
+    if a is None:
+        a = b - cap * tfms
+    key = (sym, tf, a, b)
+    c = CACHE.get(key)
+    if c and time.time() - c[0] < 300:
+        return c[1]
+    rows, cur = [], a
+    while len(rows) < cap:
+        p = {"symbol": sym, "interval": tf, "limit": 1000, "startTime": cur}
+        if b:
+            p["endTime"] = b
+        d = _get("/api/v3/klines", p)
+        if not d:
+            break
+        rows += d
+        cur = d[-1][0] + 1
+        if len(d) < 1000:
+            break
+    rows = [r for r in rows if r[0] + tfms <= time.time() * 1000]  # drop candles still forming
+    if len(rows) < 100:
+        raise HTTPException(400, "Not enough data in this date range (need at least 100 candles)")
+    df = pd.DataFrame(rows).iloc[:, :6]
+    df.columns = ["t", "open", "high", "low", "close", "volume"]
+    df = df.astype(float)
+    df["t"] = (df["t"] // 1000).astype(int)
+    CACHE[key] = (time.time(), df)
+    return df
+
 # ---------------- indicators / signals ----------------
 CATALOG = {
     "Price": {"close": 0, "open": 0, "high": 0, "low": 0, "volume": 0},
@@ -237,6 +268,33 @@ def group(df, g, cache):
     sig = [rule(df, r, cache) for r in rules]
     return np.logical_and.reduce(sig) if g.get("logic", "AND") == "AND" else np.logical_or.reduce(sig)
 
+PANE = {"rsi": "RSI", "stoch": "Stochastic", "cci": "CCI", "roc": "ROC", "macd": "MACD", "macd_sig": "MACD", "adx": "ADX",
+        "plus_di": "ADX", "minus_di": "ADX", "atr": "ATR", "body_pct": "Candle %", "range_pct": "Candle %"}
+NOPLOT = {"close", "open", "high", "low", "volume", "num", "hour", "dow", "vol_sma"} | set(PATTERNS)
+
+def overlays(df, items, limit=12):
+    """Indicator series for the chart: price-scale ones go on the candle chart, oscillators get their own pane."""
+    out, seen, t = [], set(), df["t"].tolist()
+    for o in items:
+        k = o.get("k")
+        key = (k, o.get("p"), o.get("q"))
+        if k in NOPLOT or k not in KIND_FLAG or key in seen or len(out) >= limit:
+            continue
+        seen.add(key)
+        a = ind(df, k, o.get("p"), o.get("q"))
+        label = k.upper() + (f" {o['p']}" if o.get("p") else "") + (f"@{o['q']:g}h" if o.get("q") is not None else "")
+        out.append(dict(label=label, k=k, p=o.get("p"), q=o.get("q"), pane=PANE.get(k, "price"),
+                        data=[{"time": t[i], "value": round(float(a[i]), 4)} if not np.isnan(a[i]) else {"time": t[i]} for i in range(len(t))]))
+    return out
+
+def _ov(df, q):
+    try:
+        ex = [e for e in (q.extra or []) if isinstance(e, dict) and e.get("k") in KIND_FLAG]
+        items = [r[sd] for g in GROUPS for r in ((q.strategy.get(g) or {}).get("rules") or []) for sd in ("l", "r")] + ex
+        return overlays(df, items)
+    except Exception:
+        return []
+
 # ---------------- backtest ----------------
 def backtest(df, s):
     cache = {}
@@ -357,6 +415,9 @@ class Req(BaseModel):
     interval: str = "1h"
     candles: int = 3000
     strategy: dict
+    start: str = ""
+    end: str = ""
+    extra: list = []
 
 class OptReq(Req):
     params: list[dict]
@@ -367,6 +428,13 @@ def prep(q):
     sym = q.symbol.upper().strip()
     if q.interval not in TF or not re.fullmatch(r"[A-Z0-9]{5,20}", sym):
         raise HTTPException(400, "Bad symbol or interval")
+    if q.start or q.end:
+        try:
+            a = int(pd.Timestamp(q.start, tz="UTC").timestamp() * 1000) if q.start else None
+            b = int((pd.Timestamp(q.end, tz="UTC").timestamp() + 86400) * 1000) - 1 if q.end else None
+        except Exception:
+            raise HTTPException(400, "Bad date - use the date picker")
+        return load_range(sym, q.interval, a, b)
     return load(sym, q.interval, max(200, min(q.candles, 20000)))
 
 @app.post("/api/backtest")
@@ -380,7 +448,7 @@ def api_backtest(q: Req):
     return dict(
         candles=[dict(time=t[i], open=df.open[i], high=df.high[i], low=df.low[i], close=df.close[i]) for i in range(len(df))],
         equity=[dict(time=t[i], value=round(float(equity[i]), 2)) for i in range(len(df))],
-        trades=trades, metrics=metrics(df, equity, trades, q.interval, cap0))
+        trades=trades, metrics=metrics(df, equity, trades, q.interval, cap0), overlays=_ov(df, q))
 
 def set_path(d, path, v):
     a = path.split(".")

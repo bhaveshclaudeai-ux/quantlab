@@ -18,6 +18,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:5px 8px;b
 .pos{color:var(--g)}.neg{color:var(--r)}#msg{margin-top:8px;color:var(--m)}h2{font-size:14px;margin:18px 0 0}
 #cl{max-height:200px;overflow:auto;font-size:13px;background:#0d141d;border:1px solid var(--b);border-radius:8px;padding:6px 10px}#cl p{margin:6px 0}#cl .u{color:#93c5fd}
 .it{border:1px solid var(--b);border-radius:8px;padding:8px;margin:6px 0}.sub{color:var(--m);font-size:12px}.sub2{color:#6b7a8d;font-size:11px;margin:3px 0 4px;word-break:break-word}#tt.on,#th.on{background:var(--a);border-color:var(--a)}
+.chip{padding:3px 9px;font-size:12px;border-radius:999px}#ctb button.on{background:var(--a);border-color:var(--a)}
 </style></head><body>
 <aside><h1>⚡ QuantLab</h1>
 <select id=pre onchange="usePreset(this.value)"></select>
@@ -30,6 +31,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:5px 8px;b
 <div class=row><button onclick="tplSave()">★ Save template</button><button onclick="svExport()">Export current</button><button onclick="svBackup()">Backup all</button><button onclick="$('imp').click()">Import</button><button onclick="histClear()">Clear history</button><input id=imp type=file accept=".json,application/json" hidden onchange="svImport(this)"></div>
 <h3>Market (Binance)</h3>
 <div class=row><input id=sym list=sy value=BTCUSDT style="width:130px"><datalist id=sy></datalist><select id=tf></select><input id=n type=number value=3000 title="Candles (max 20000)"></div>
+<div class=row style="font-size:12px;color:var(--m)">From <input id=d1 type=date style="width:142px"> To <input id=d2 type=date style="width:142px"></div><div class=sub>Dates override the candle count (max 20,000 candles). Empty = latest candles.</div>
 <h3>Direction</h3>
 <select id=dir onchange="S.direction=this.value"><option value=long>Long only</option><option value=short>Short only</option><option value=both>Long + Short</option></select>
 <h3>Rules (entry fills at next candle open)</h3><div id=G></div>
@@ -41,7 +43,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:5px 8px;b
 <h3>Monte Carlo</h3>
 <div class=row><input id=mcn type=number value=1000 title="Simulations"><select id=mcm><option value=bootstrap>Resample trades</option><option value=shuffle>Shuffle order</option></select><button onclick="mc()">Run Monte Carlo</button></div>
 <div class=row style="margin-top:14px"><button class=pri onclick="run()">Run backtest</button><button onclick="opt()">Optimize</button></div><div id=msg></div></aside>
-<main><div class=cards id=cards></div><div class=ch id=pc></div><div class=ch id=ec style="height:220px"></div>
+<main><div class=cards id=cards></div><div class=row id=ctb></div><div class=row id=leg></div><div class=ch id=pc></div><div id=osc></div><div class=ch id=ec style="height:220px"></div>
 <div id=mcres></div><div id=ores></div><h2>Trades</h2><div class=box id=T></div></main>
 <script>
 const $=id=>document.getElementById(id);
@@ -80,7 +82,7 @@ function addOpt(){const c=cands().filter(x=>!OP.some(p=>p.path===x[0]));if(!c.le
 function renderOpt(){const c=cands();OP=OP.filter(p=>c.some(x=>x[0]===p.path));
  $('O').innerHTML=OP.map((p,i)=>`<div class=row><select onchange="OP[${i}].path=this.value">${c.map(x=>`<option value="${x[0]}" ${x[0]===p.path?'selected':''}>${x[1]}</option>`).join('')}</select>`+['start','end','step'].map(k=>`<input type=number step=any value=${p[k]} title=${k} oninput="OP[${i}].${k}=+this.value">`).join('')+`<button onclick="OP.splice(${i},1);renderOpt()">×</button></div>`).join('')}
 async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.detail||'Server error '+r.status);return j}
-const req=()=>({symbol:$('sym').value,interval:$('tf').value,candles:+$('n').value,strategy:S});
+const req=()=>({symbol:$('sym').value,interval:$('tf').value,candles:+$('n').value,strategy:S,start:$('d1').value,end:$('d2').value,extra:CX});
 const busy=t=>$('msg').textContent=t;
 async function run(){busy('Fetching data & backtesting…');try{show(await post('/api/backtest',req()));busy('')}catch(e){busy('⚠ '+e.message)}}
 async function opt(){if(!OP.length)return busy('Add at least one parameter to optimize');busy('Optimizing… (can take a while)');
@@ -122,7 +124,7 @@ const mk=el=>LightweightCharts.createChart(el,{autoSize:true,layout:{background:
 let pc,ec,cs,eqs;
 function show(d){histAdd(d.metrics);const m=d.metrics,f=(v,s='')=>`<span class="${v>=0?'pos':'neg'}">${v}${s}</span>`;
  $('cards').innerHTML=[['Net return',f(m.ret,'%')],['Buy & hold',f(m.bh,'%')],['Max drawdown',f(m.dd,'%')],['Win rate',m.win+'%'],['Profit factor',m.pf],['Sharpe',m.sharpe],['Trades',m.trades,`${m.nw} wins / ${m.trades-m.nw} losses`],['Avg R:R',m.rr,`avg win ${m.aw}% · avg loss ${m.al}%`],['Max win streak',m.mws??'–',`${m.mws??0} wins in a row · P&L +${m.mws_pnl??0}`],['Max loss streak',m.mls??'–',`${m.mls??0} losses in a row · P&L ${m.mls_pnl??0}`],['Avg trade',f(m.avg,'%')],['Final equity',m.final]].map(([a,b,c])=>`<div class=card><small>${a}</small><b>${b}</b>${c?`<small>${c}</small>`:''}</div>`).join('');
- eqs.applyOptions({baseValue:{type:'price',price:+S.capital||10000}});cs.setData(d.candles);eqs.setData(d.equity);
+ eqs.applyOptions({baseValue:{type:'price',price:+S.capital||10000}});cs.setData(d.candles);eqs.setData(d.equity);LASTC=d.candles;drawOv(d.overlays||[]);ctbRender();
  const mk2=[];d.trades.forEach(t=>{const L=t.side==='long';mk2.push({time:t.t0,position:L?'belowBar':'aboveBar',color:'#3b82f6',shape:L?'arrowUp':'arrowDown'},{time:t.t1,position:L?'aboveBar':'belowBar',color:t.pnl>0?'#22c55e':'#ef4444',shape:'circle'})});
  cs.setMarkers(mk2.sort((a,b)=>a.time-b.time));const fit=()=>{pc.timeScale().fitContent();ec.timeScale().fitContent()};fit();setTimeout(fit,80);
  $('T').innerHTML=`<table><tr><th>#</th><th>Side</th><th>Entry time</th><th>Entry</th><th>Exit</th><th>PnL</th><th>%</th><th>Exit by</th></tr>`+d.trades.map((t,i)=>[i+1,t,t]).reverse().map(([i,t])=>`<tr><td>${i}</td><td>${t.side}</td><td>${new Date(t.t0*1000).toLocaleString()}</td><td>${t.entry.toFixed(4)}</td><td>${t.exit.toFixed(4)}</td><td class="${t.pnl>=0?'pos':'neg'}">${t.pnl.toFixed(2)}</td><td>${t.pct.toFixed(2)}</td><td>${t.why}</td></tr>`).join('')+`</table>`}
@@ -131,8 +133,8 @@ const SK='quantlab_saved',HK='quantlab_hist';let LT='tpl',LASTM=null,LASTK='';
 const rd=(k,d)=>{try{return JSON.parse(localStorage.getItem(k)||d)}catch(e){return JSON.parse(d)}};
 const wr=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){busy('⚠ Browser storage full or unavailable — use Backup all')}};
 const svAll=()=>rd(SK,'{}'),histAll=()=>rd(HK,'[]');
-const snap=()=>({S:structuredClone(S),sym:$('sym').value,tf:$('tf').value,n:+$('n').value});
-const skey=x=>JSON.stringify([x.S,x.sym,x.tf,x.n]);
+const snap=()=>({S:structuredClone(S),sym:$('sym').value,tf:$('tf').value,n:+$('n').value,d1:$('d1').value,d2:$('d2').value});
+const skey=x=>JSON.stringify([x.S,x.sym,x.tf,x.n,x.d1,x.d2]);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const opn=o=>o.k==='num'?o.v:o.k.toUpperCase()+(o.p?' '+o.p:'')+(o.q!==undefined?'@'+o.q:'');
 const SYM={'>':'>','<':'<',x_up:'↗',x_dn:'↘'};
@@ -144,7 +146,7 @@ function libTab(t){LT=t;libRender()}
 function libRender(){const T=svAll(),H=histAll();$('tt').className=LT==='tpl'?'on':'';$('th').className=LT==='hist'?'on':'';
  const it=(title,e,kind,i)=>{const m=e.m;return `<div class=it><b>${esc(title)}</b><div class=sub>${e.sym||''} ${e.tf||''}${m?` · <span class="${m.ret>=0?'pos':'neg'}">${m.ret}%</span> · DD ${m.dd}% · ${m.trades} trades · PF ${m.pf}`:''}${kind==='tpl'&&e.t?' · saved '+ago(e.t):''}</div><div class=sub2>${esc(desc(e.S))}</div><div class=row><button onclick="libLoad('${kind}',${i})">Load &amp; run</button>`+(kind==='hist'?`<button onclick="libStar(${i})">★ Template</button>`:`<button onclick="libRen(${i})">Rename</button>`)+`<button onclick="libDel('${kind}',${i})">Delete</button></div></div>`};
  $('lib').innerHTML=LT==='tpl'?(Object.keys(T).map((n,i)=>it(n,T[n],'tpl',i)).join('')||'<p class=sub>No templates yet. Run a backtest you like, then tap “★ Save template”.</p>'):(H.map((e,i)=>it(new Date(e.t).toLocaleString([],{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}),e,'hist',i)).join('')||'<p class=sub>No history yet. Every backtest you run is saved here automatically.</p>')}
-function svApply(d){if(!d||!d.S||!d.S.direction)throw Error('Invalid strategy file');S={...structuredClone(base),...d.S};OP=[];if(d.sym)$('sym').value=d.sym;if(d.tf)$('tf').value=d.tf;if(d.n)$('n').value=d.n;render()}
+function svApply(d){if(!d||!d.S||!d.S.direction)throw Error('Invalid strategy file');S={...structuredClone(base),...d.S};OP=[];if(d.sym)$('sym').value=d.sym;if(d.tf)$('tf').value=d.tf;if(d.n)$('n').value=d.n;$('d1').value=d.d1||'';$('d2').value=d.d2||'';render()}
 function libLoad(k,i){const e=k==='tpl'?svAll()[Object.keys(svAll())[i]]:histAll()[i];if(!e)return;try{svApply(e);busy('');run()}catch(x){busy('⚠ '+x.message)}}
 function libDel(k,i){if(k==='tpl'){const a=svAll(),n=Object.keys(a)[i];if(!confirm('Delete template “'+n+'”?'))return;delete a[n];wr(SK,a)}else{const a=histAll();a.splice(i,1);wr(HK,a)}libRender()}
 function tplPut(e){const n=(prompt('Template name?')||'').trim();if(!n)return;const a=svAll();if(a[n]&&!confirm('“'+n+'” already exists. Overwrite?'))return;a[n]={...e,t:Date.now()};wr(SK,a);LT='tpl';libRender();busy('Saved template “'+n+'” ⭐')}
@@ -155,8 +157,28 @@ function histClear(){if(confirm('Clear all history? (Templates are kept)')){wr(H
 const dl=(o,f)=>{const b=new Blob([JSON.stringify(o,null,1)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=f;a.click()};
 const svExport=()=>dl(snap(),'quantlab_'+$('sym').value+'.json'),svBackup=()=>dl({templates:svAll(),history:histAll()},'quantlab_backup.json');
 function svImport(i){const f=i.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{const d=JSON.parse(r.result);if(d.templates){wr(SK,{...svAll(),...d.templates});wr(HK,[...histAll(),...(d.history||[])].sort((a,b)=>b.t-a.t).slice(0,100));libRender();busy('Backup imported')}else{svApply(d);busy('Imported '+f.name)}}catch(e){busy('⚠ '+e.message)}};r.readAsText(f);i.value=''}
+const CX=rd('quantlab_cx','[]');
+const COL=['#f59e0b','#22d3ee','#a78bfa','#f472b6','#34d399','#fb923c','#60a5fa','#e879f9'];
+const PANEJS={rsi:'RSI',stoch:'Stochastic',cci:'CCI',roc:'ROC',macd:'MACD',macd_sig:'MACD',adx:'ADX',plus_di:'ADX',minus_di:'ADX',atr:'ATR',body_pct:'Candle %',range_pct:'Candle %'};
+const NOADD=['num','close','open','high','low','volume','hour','dow','vol_sma',...PAT];
+let OV=[],OC=[],LASTC=null;
+pc.timeScale().subscribeVisibleLogicalRangeChanged(r=>{if(r)OC.forEach(c=>c.timeScale().setVisibleLogicalRange(r))});
+function ctbRender(){const tf=$('tf').value;
+ $('ctb').innerHTML=['1m','5m','15m','1h','4h','1d'].map(x=>`<button class="${x===tf?'on':''}" onclick="setTf('${x}')">${x}</button>`).join('')+'<span style="width:6px"></span>'+[['1D',1],['1W',7],['1M',30],['3M',90],['All',0]].map(([l,d])=>`<button onclick="zoomR(${d})">${l}</button>`).join('')+'<span class=sub>UTC</span><select id=ix>'+Object.keys(KINDS).filter(k=>!NOADD.includes(k)).map(k=>`<option>${k}</option>`).join('')+'</select><input id=ip type=number value=20 style="width:62px" title="period (minutes for opening range)"><button onclick="addInd()">+ Indicator</button>'}
+function setTf(x){$('tf').value=x;run()}
+function zoomR(d){if(!LASTC||!LASTC.length)return;const to=LASTC[LASTC.length-1].time;try{d?pc.timeScale().setVisibleRange({from:to-d*86400,to}):pc.timeScale().fitContent()}catch(e){pc.timeScale().fitContent()}}
+function addInd(){const k=$('ix').value,p=+$('ip').value;CX.push(KINDS[k]===3?{k,p:p||30,q:0}:KINDS[k]===1?{k,p:p||20}:{k});wr('quantlab_cx',CX);run()}
+function rmInd(i){CX.splice(i,1);wr('quantlab_cx',CX);run()}
+function togOv(i){const o=OV[i];o.on=!o.on;o.s.applyOptions({visible:o.on});legRender()}
+function legRender(){$('leg').innerHTML=OV.map((o,i)=>{const x=CX.findIndex(e=>e.k===o.k&&(e.p||0)===(o.p||0)&&(e.q||0)===(o.q||0));return `<button class=chip style="border-color:${o.col};opacity:${o.on?1:.4}" onclick="togOv(${i})"><span style="color:${o.col}">●</span> ${o.label}${x>=0?` <span onclick="event.stopPropagation();rmInd(${x})">×</span>`:''}</button>`}).join('')}
+function drawOv(list){OV.forEach(o=>{try{o.chart.removeSeries(o.s)}catch(e){}});OC.forEach(c=>c.remove());OV=[];OC=[];$('osc').innerHTML='';const panes={};
+ list.forEach((o,i)=>{const col=COL[i%COL.length];let ch=pc;
+  if(o.pane!=='price'){if(!panes[o.pane]){const w=document.createElement('div');w.innerHTML=`<div class=sub style="margin-top:8px">${o.pane}</div><div class=ch style="height:150px;margin:2px 0"></div>`;$('osc').appendChild(w);panes[o.pane]=mk(w.lastChild);OC.push(panes[o.pane])}ch=panes[o.pane]}
+  const s=ch.addLineSeries({color:col,lineWidth:1.5,priceLineVisible:false,lastValueVisible:false});s.setData(o.data);OV.push({s,chart:ch,col,on:true,label:o.label,k:o.k,p:o.p,q:o.q})});
+ const seen=new Set();for(const g in GN)S[g].rules.forEach(r=>[[r.l,r.r],[r.r,r.l]].forEach(([a,b])=>{const pn=PANEJS[a.k];if(pn&&b.k==='num'&&panes[pn]&&!seen.has(pn+b.v)){seen.add(pn+b.v);OV.find(x=>x.chart===panes[pn]).s.createPriceLine({price:b.v,color:'#6b7a8d',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:''})}}));
+ legRender();const r=pc.timeScale().getVisibleLogicalRange();if(r)OC.forEach(c=>c.timeScale().setVisibleLogicalRange(r))}
 $('pre').innerHTML=Object.keys(PRE).map(k=>`<option>${k}</option>`).join('');
 $('tf').innerHTML=['1m','3m','5m','15m','30m','1h','2h','4h','1d'].map(k=>`<option ${k==='1h'?'selected':''}>${k}</option>`).join('');
-usePreset(Object.keys(PRE)[0]);libRender();say('a','Hi! Apni strategy words mein likho, jaise: “long when ema 9 crosses above ema 21 and rsi below 70, exit when rsi above 80, sl 1% tp 2%”. Candle patterns (hammer, bullish engulfing), previous day high/low, opening range (“15 min opening range from 13:30 utc”), volume profile (poc, vah, val), supertrend, adx, stoch, time window (between 8 and 20 utc) sab chalte hain. “new strategy” se reset.');
+usePreset(Object.keys(PRE)[0]);libRender();ctbRender();say('a','Hi! Apni strategy words mein likho, jaise: “long when ema 9 crosses above ema 21 and rsi below 70, exit when rsi above 80, sl 1% tp 2%”. Candle patterns (hammer, bullish engulfing), previous day high/low, opening range (“15 min opening range from 13:30 utc”), volume profile (poc, vah, val), supertrend, adx, stoch, time window (between 8 and 20 utc) sab chalte hain. “new strategy” se reset.');
 fetch('/api/symbols').then(r=>r.json()).then(s=>$('sy').innerHTML=s.map(x=>`<option value=${x}>`).join('')).catch(()=>{});
 </script></body></html>
