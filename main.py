@@ -554,8 +554,16 @@ def clean_strategy(st, cur):
 def _dsc(o):
     return f"{o['v']:g}" if o["k"] == "num" else o["k"].upper() + (f" {o['p']}" if "p" in o else "") + (f" @{o['q']:g}h UTC" if "q" in o else "")
 
+PNAME = {"bull_candle": "Green candle", "bear_candle": "Red candle", "bull_engulf": "Bullish engulfing", "bear_engulf": "Bearish engulfing",
+         "hammer": "Hammer", "shooting_star": "Shooting star", "doji": "Doji", "inside_bar": "Inside bar"}
+
+def _rtxt(r):
+    if r["l"]["k"] in PNAME and r["op"] == ">" and r["r"]["k"] == "num" and r["r"]["v"] == 0.5:
+        return f"{PNAME[r['l']['k']]} formed"
+    return f"{_dsc(r['l'])} {OPTXT[r['op']]} {_dsc(r['r'])}"
+
 def _dg(g):
-    return (" OR " if g["logic"] == "OR" else " AND ").join(f"{_dsc(r['l'])} {OPTXT[r['op']]} {_dsc(r['r'])}" for r in g["rules"])
+    return (" OR " if g["logic"] == "OR" else " AND ").join(_rtxt(r) for r in g["rules"])
 
 def _opd(tok, per, ctx):
     tok = tok.strip()
