@@ -155,6 +155,120 @@ def _dk(df):
     """Trading-day index: UTC day for crypto, CME session day for futures."""
     return df["dk"] if "dk" in df else df["t"] // 86400
 
+# ---------------- CSV import (any market, any history) ----------------
+CSVS = {}
+CSV_CAP = 60000
+CSV_TZ = ("UTC", "Asia/Kolkata", "America/New_York", "Europe/London", "Europe/Zurich")
+BASES_MIN = [1, 3, 5, 15, 30, 60, 120, 240, 1440]
+
+def _ptime(s, tz):
+    s = s.astype(str).str.strip()
+    num = pd.to_numeric(s, errors="coerce")
+    if num.notna().mean() > 0.9:                                     # unix seconds / milliseconds
+        return pd.to_datetime(num, unit="ms" if num.median() > 1e11 else "s", utc=True, errors="coerce")
+    f = s.iloc[0]
+    if re.match(r"^\d{4}\.\d{2}\.\d{2}", f):                         # MT4: 2024.01.02
+        s = s.str.replace(r"^(\d{4})\.(\d{2})\.(\d{2})", r"\1-\2-\3", regex=True)
+    t = pd.to_datetime(s, dayfirst=bool(re.match(r"^\d{2}[./]\d{2}[./]\d{4}", f)), errors="coerce")
+    if t.dt.tz is None:
+        return t.dt.tz_localize(tz, ambiguous="NaT", nonexistent="shift_forward").dt.tz_convert("UTC")
+    return t.dt.tz_convert("UTC")
+
+def parse_csv(text, tz="UTC"):
+    import io
+    try:
+        raw = pd.read_csv(io.StringIO(text), sep=None, engine="python", header=None, dtype=str, skip_blank_lines=True)
+    except Exception as e:
+        raise HTTPException(400, f"Could not read this file as CSV ({str(e)[:80]})")
+    if raw.shape[1] < 5 or len(raw) < 10:
+        raise HTTPException(400, "CSV needs at least: time, open, high, low, close")
+    head = [str(x).strip().lower() for x in raw.iloc[0]]
+    vol = None
+    if re.search(r"open|high|low|close", " ".join(head)):            # file has a header row
+        raw = raw.iloc[1:]
+        col = lambda *ks: next((i for i, h in enumerate(head) if any(k in h for k in ks) and "interest" not in h), None)
+        io_, ih, il, ic, iv = col("open"), col("high"), col("low"), col("close"), col("vol")
+        tcols = [i for i, h in enumerate(head) if re.search(r"time|date|gmt|stamp", h)]
+        if None in (io_, ih, il, ic) or not tcols:
+            raise HTTPException(400, f"Could not find time/open/high/low/close columns in header: {head[:8]}")
+        ts = raw.iloc[:, tcols[0]] if len(tcols) == 1 else raw.iloc[:, tcols[0]].astype(str) + " " + raw.iloc[:, tcols[1]].astype(str)
+        o, h, l, c = (raw.iloc[:, i] for i in (io_, ih, il, ic))
+        vol = raw.iloc[:, iv] if iv is not None else None
+    else:                                                            # no header: [dt,o,h,l,c,(v)] or MT4 [date,time,o,h,l,c,(v)]
+        if raw.shape[1] >= 6 and re.match(r"^\d{1,2}:\d{2}", str(raw.iloc[0, 1]).strip()):
+            ts = raw.iloc[:, 0].astype(str) + " " + raw.iloc[:, 1].astype(str)
+            o, h, l, c = (raw.iloc[:, i] for i in (2, 3, 4, 5))
+            vol = raw.iloc[:, 6] if raw.shape[1] > 6 else None
+        else:
+            ts = raw.iloc[:, 0]
+            o, h, l, c = (raw.iloc[:, i] for i in (1, 2, 3, 4))
+            vol = raw.iloc[:, 5] if raw.shape[1] > 5 else None
+    t = _ptime(ts, tz)
+    df = pd.DataFrame({"ts": t.values if hasattr(t, "values") else t, "open": pd.to_numeric(o, errors="coerce"), "high": pd.to_numeric(h, errors="coerce"),
+                       "low": pd.to_numeric(l, errors="coerce"), "close": pd.to_numeric(c, errors="coerce"),
+                       "volume": pd.to_numeric(vol, errors="coerce").fillna(0) if vol is not None else 1.0})
+    df = df.dropna(subset=["ts", "open", "high", "low", "close"])
+    df["t"] = ((pd.to_datetime(df["ts"], utc=True) - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(seconds=1)).astype("int64")
+    df = df.drop(columns="ts").sort_values("t").drop_duplicates("t").reset_index(drop=True)
+    df = df[["t", "open", "high", "low", "close", "volume"]]
+    if len(df) < 100:
+        raise HTTPException(400, f"Only {len(df)} valid rows found - check the date format / columns")
+    step = float(np.median(np.diff(df["t"].to_numpy()))) / 60
+    if step < 0.99:
+        raise HTTPException(400, "This looks like tick data. Please export 1-minute (or larger) candles.")
+    base = min(BASES_MIN, key=lambda x: abs(x - step))
+    return df, base
+
+def _sess_day(df):
+    loc = pd.to_datetime(df["t"], unit="s", utc=True).dt.tz_convert("America/New_York").dt.tz_localize(None) + pd.Timedelta(hours=6)
+    return (loc.dt.normalize() - pd.Timestamp("1970-01-01")).dt.days.astype(int)
+
+class CsvReq(BaseModel):
+    name: str
+    text: str
+    tz: str = "UTC"
+    day: str = "utc"
+
+@app.post("/api/csv")
+def api_csv(q: CsvReq):
+    if len(q.text) > 80_000_000:
+        raise HTTPException(400, "File too large (max ~80 MB). Use a shorter period or a larger timeframe.")
+    tz = q.tz if q.tz in CSV_TZ else "UTC"
+    df, base = parse_csv(q.text, tz)
+    key = re.sub(r"[^a-z0-9_]", "", q.name.lower()) or "file"
+    CSVS.pop(key, None)
+    CSVS[key] = dict(df=df, base=base, day="ny18" if q.day == "ny18" else "utc")
+    while len(CSVS) > 5:
+        CSVS.pop(next(iter(CSVS)))
+    iso = lambda s: pd.Timestamp(int(s), unit="s", tz="UTC").strftime("%Y-%m-%d %H:%M")
+    return dict(key="CSV:" + key, rows=len(df), base=base, first=iso(df["t"].iloc[0]), last=iso(df["t"].iloc[-1]))
+
+def load_csv(key, tf, n, a, b):
+    e = CSVS.get(key)
+    if not e:
+        raise HTTPException(404, f"CSV not loaded: '{key}' is not on the server (the server forgets files when it sleeps). Import the file again.")
+    base, want, df = e["base"], TF[tf], e["df"]
+    if want < base:
+        raise HTTPException(400, f"This file has {base}-minute candles, so you cannot use a smaller timeframe ({tf}). Pick {base}m or larger.")
+    if want % base:
+        raise HTTPException(400, f"Timeframe {tf} must be a multiple of the file's {base}-minute candles.")
+    if want > base:
+        g = df.set_index(pd.to_datetime(df["t"], unit="s", utc=True)).drop(columns="t").resample(f"{want}min", origin="start_day").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna(subset=["open"])
+        df = g.reset_index(drop=True)
+        df.insert(0, "t", ((g.index - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(seconds=1)).astype("int64"))
+    if a is not None or b is not None:
+        df = df[(df["t"] >= (a / 1000 if a else 0)) & (df["t"] <= (b / 1000 if b else 4e9))]
+        df = df.tail(CSV_CAP)
+    else:
+        df = df.tail(n)
+    df = df.reset_index(drop=True)
+    if len(df) < 100:
+        raise HTTPException(400, f"Only {len(df)} candles in this selection - widen the dates or lower the timeframe.")
+    if e["day"] == "ny18":
+        df["dk"] = _sess_day(df)
+    return df
+
 # ---------------- indicators / signals ----------------
 CATALOG = {
     "Price": {"close": 0, "open": 0, "high": 0, "low": 0, "volume": 0},
@@ -506,6 +620,10 @@ def prep(q):
         q.interval.strip().lower(), q.interval.strip().lower())
     raw = re.sub(r"[^A-Z0-9]", "", q.symbol.upper())
     a, b = _dates(q)
+    if q.symbol.strip().upper().startswith("CSV:"):           # imported file
+        if q.interval not in TF:
+            raise HTTPException(400, f"Bad timeframe '{q.interval}'")
+        return load_csv(re.sub(r"[^a-z0-9_]", "", q.symbol.strip()[4:].lower()), q.interval, max(200, min(q.candles, CSV_CAP)), a, b)
     if raw in YF:                                             # NQ, S&P 500 (ES), Gold
         if q.interval not in TF:
             raise HTTPException(400, f"Bad timeframe '{q.interval}'")
@@ -549,8 +667,9 @@ def api_optimize(q: OptReq):
     except Exception:
         raise HTTPException(400, "Bad parameter range")
     total = math.prod(len(r) for r in ranges)
-    if total > 1500:
-        raise HTTPException(400, f"{total} combinations — limit is 1500. Reduce range or increase step.")
+    lim = max(20, min(1500, 6_000_000 // len(df)))      # fewer combos when there is a lot of data
+    if total > lim:
+        raise HTTPException(400, f"{total} combinations - the limit for {len(df)} candles is {lim}. Reduce the range, increase the step, or use fewer candles.")
     L = [len(r) for r in ranges]
     fmt = lambda p, v: int(round(v)) if p["path"].endswith(".p") else round(float(v), 4)
     two = len(q.params) == 2

@@ -33,6 +33,9 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:5px 8px;b
 <div class=row><input id=sym list=sy value=BTCUSDT style="width:130px"><datalist id=sy><option value=NQ><option value=ES><option value=GOLD></datalist><select id=tf></select><input id=n type=number value=3000 title="Candles (max 20000)"></div>
 <div class=row id=qs><button onclick="$('sym').value='NQ';ctbRender()">NQ</button><button onclick="$('sym').value='ES';ctbRender()">S&amp;P (ES)</button><button onclick="$('sym').value='GOLD';ctbRender()">Gold</button><button onclick="$('sym').value='BTCUSDT';ctbRender()">BTC</button><button onclick="$('sym').value='ETHUSDT';ctbRender()">ETH</button></div>
 <div class=sub>NQ / S&amp;P / Gold = CME futures from Yahoo Finance (trading day starts 18:00 New York). Intraday history is limited: 1m ≈ 6 days, 5–30m ≈ 59 days, 1h ≈ 2 years, 1d = many years. 3m/2h/4h are built from smaller candles.</div>
+<div class=row><button onclick="$('csvf').click()">📁 Import CSV</button><select id=csvtz title="Time zone of the times inside the file"><option value=UTC>File time: UTC</option><option value=Asia/Kolkata>File time: IST</option><option value=America/New_York>File time: New York</option><option value=Europe/London>File time: London</option><option value=Europe/Zurich>File time: Zurich</option></select><select id=csvday title="When a new trading day starts (for previous-day levels, VWAP, daily limits)"><option value=utc>Day: 00:00 UTC</option><option value=ny18>Day: 18:00 New York</option></select><input id=csvf type=file accept=".csv,.txt,text/csv" hidden onchange="csvUp(this)"></div>
+<div id=csvl class=row></div>
+<div class=sub>CSV = time, open, high, low, close, (volume). Works with Dukascopy, TradingView and MT4 exports (up to ~60,000 candles per backtest). Use a timeframe ≥ the file's candle size. Your files are kept in this browser.</div>
 <div class=row style="font-size:12px;color:var(--m)">From <input id=d1 type=date style="width:142px"> To <input id=d2 type=date style="width:142px"></div><div class=sub>Dates override the candle count (max 20,000 candles). Empty = latest candles.</div>
 <h3>Direction</h3>
 <select id=dir onchange="S.direction=this.value"><option value=long>Long only</option><option value=short>Short only</option><option value=both>Long + Short</option></select>
@@ -83,7 +86,10 @@ function addOpt(){const c=cands().filter(x=>!OP.some(p=>p.path===x[0]));if(!c.le
  OP.push(path.endsWith('_pct')?{path,start:.5,end:3,step:.5}:{path,start:Math.max(2,Math.round(cur/2)),end:cur*2,step:Math.max(1,Math.round(cur/5))});renderOpt()}
 function renderOpt(){const c=cands();OP=OP.filter(p=>c.some(x=>x[0]===p.path));
  $('O').innerHTML=OP.map((p,i)=>`<div class=row><select onchange="OP[${i}].path=this.value">${c.map(x=>`<option value="${x[0]}" ${x[0]===p.path?'selected':''}>${x[1]}</option>`).join('')}</select>`+['start','end','step'].map(k=>`<input type=number step=any value=${p[k]} title=${k} oninput="OP[${i}].${k}=+this.value">`).join('')+`<button onclick="OP.splice(${i},1);renderOpt()">×</button></div>`).join('')}
-async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.detail||'Server error '+r.status);return j}
+async function post(u,b){const go=()=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});let r=await go(),j=await r.json().catch(()=>({}));
+ if(!r.ok&&String(j.detail||'').startsWith('CSV not loaded')&&b&&String(b.symbol||'').toUpperCase().startsWith('CSV:')){let e=null;try{e=await idb('readonly',s=>s.get(csvKey(b.symbol.slice(4))))}catch(x){}
+  if(e){busy('Re-loading your CSV on the server…');await csvPost(e);r=await go();j=await r.json().catch(()=>({}))}}
+ if(!r.ok)throw new Error(j.detail||'Server error '+r.status);return j}
 const req=()=>({symbol:$('sym').value,interval:$('tf').value,candles:+$('n').value,strategy:S,start:$('d1').value,end:$('d2').value,extra:CX});
 const busy=t=>$('msg').textContent=t;
 async function run(){busy('Fetching data & backtesting…');try{show(await post('/api/backtest',req()));busy('')}catch(e){busy('⚠ '+e.message)}}
@@ -200,8 +206,17 @@ function drawEq(){const d=LASTD;if(!d||!d.candles.length)return;const cap=+S.cap
  else{eqs.applyOptions({baseValue:{type:'price',price:cap}});eqs.setData(d.equity)}
  $('etb').innerHTML=`<button class="${EQM==='pnl'?'on':''}" onclick="setEqm('pnl')">Cumulative P&amp;L (closed trades)</button><button class="${EQM==='eq'?'on':''}" onclick="setEqm('eq')">Equity (live, incl. open trade)</button>`;ec.timeScale().fitContent();requestAnimationFrame(()=>ec.timeScale().fitContent())}
 function setEqm(m){EQM=m;wr('quantlab_eqm',m);drawEq()}
+const idb=(m,f)=>new Promise((ok,no)=>{const r=indexedDB.open('quantlab',1);r.onupgradeneeded=()=>r.result.createObjectStore('csv');r.onsuccess=()=>{const t=r.result.transaction('csv',m),q=f(t.objectStore('csv'));t.oncomplete=()=>ok(q&&q.result);t.onerror=()=>no(t.error)};r.onerror=()=>no(r.error)});
+const csvKey=n=>n.replace(/\.[^.]*$/,'').toLowerCase().replace(/[^a-z0-9_]+/g,'_').replace(/^_+|_+$/g,'')||'file';
+const csvPost=e=>post('/api/csv',{name:e.name,text:e.text,tz:e.tz,day:e.day});
+async function csvUp(i){const f=i.files[0];i.value='';if(!f)return;busy('Reading file…');
+ try{const text=await f.text(),e={name:csvKey(f.name),text,tz:$('csvtz').value,day:$('csvday').value},r=await csvPost(e);
+  try{await idb('readwrite',s=>s.put(e,e.name))}catch(x){}
+  $('sym').value=r.key;busy(`Imported ${r.rows} candles (${r.base}m) · ${r.first} → ${r.last} UTC. Pick a timeframe ≥ ${r.base}m and press Run backtest.`);csvList();ctbRender()}catch(x){busy('⚠ '+x.message)}}
+async function csvList(){try{const k=await idb('readonly',s=>s.getAllKeys());$('csvl').innerHTML=(k||[]).map(n=>`<button class=chip onclick="$('sym').value='CSV:${n}'">${n}</button><span onclick="csvDel('${n}')" style="cursor:pointer;color:var(--m);margin-right:6px">×</span>`).join('')}catch(e){}}
+async function csvDel(n){try{await idb('readwrite',s=>s.delete(n))}catch(e){}csvList()}
 $('pre').innerHTML=Object.keys(PRE).map(k=>`<option>${k}</option>`).join('');
 $('tf').innerHTML=['1m','3m','5m','15m','30m','1h','2h','4h','1d'].map(k=>`<option ${k==='1h'?'selected':''}>${k}</option>`).join('');
-usePreset(Object.keys(PRE)[0]);libRender();ctbRender();say('a','Hi! Apni strategy words mein likho, jaise: “long when ema 9 crosses above ema 21 and rsi below 70, exit when rsi above 80, sl 1% tp 2%”. Candle patterns (hammer, bullish engulfing), previous day high/low, opening range (“15 min opening range from 13:30 utc”), volume profile (poc, vah, val), supertrend, adx, stoch, time window (between 8 and 20 utc) sab chalte hain. “new strategy” se reset.');
+usePreset(Object.keys(PRE)[0]);libRender();ctbRender();csvList();say('a','Hi! Apni strategy words mein likho, jaise: “long when ema 9 crosses above ema 21 and rsi below 70, exit when rsi above 80, sl 1% tp 2%”. Candle patterns (hammer, bullish engulfing), previous day high/low, opening range (“15 min opening range from 13:30 utc”), volume profile (poc, vah, val), supertrend, adx, stoch, time window (between 8 and 20 utc) sab chalte hain. “new strategy” se reset.');
 fetch('/api/symbols').then(r=>r.json()).then(s=>$('sy').innerHTML='<option value=NQ><option value=ES><option value=GOLD>'+s.map(x=>`<option value=${x}>`).join('')).catch(()=>{});
 </script></body></html>
