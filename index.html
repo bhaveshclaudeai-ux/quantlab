@@ -18,7 +18,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:5px 8px;b
 .pos{color:var(--g)}.neg{color:var(--r)}#msg{margin-top:8px;color:var(--m)}h2{font-size:14px;margin:18px 0 0}
 #cl{max-height:200px;overflow:auto;font-size:13px;background:#0d141d;border:1px solid var(--b);border-radius:8px;padding:6px 10px}#cl p{margin:6px 0}#cl .u{color:#93c5fd}
 .it{border:1px solid var(--b);border-radius:8px;padding:8px;margin:6px 0}.sub{color:var(--m);font-size:12px}.sub2{color:#6b7a8d;font-size:11px;margin:3px 0 4px;word-break:break-word}#tt.on,#th.on{background:var(--a);border-color:var(--a)}
-.chip{padding:3px 9px;font-size:12px;border-radius:999px}#ctb button.on{background:var(--a);border-color:var(--a)}
+.chip{padding:3px 9px;font-size:12px;border-radius:999px}#etb button.on,#ctb button.on{background:var(--a);border-color:var(--a)}
 </style></head><body>
 <aside><h1>⚡ QuantLab</h1>
 <select id=pre onchange="usePreset(this.value)"></select>
@@ -43,7 +43,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:5px 8px;b
 <h3>Monte Carlo</h3>
 <div class=row><input id=mcn type=number value=1000 title="Simulations"><select id=mcm><option value=bootstrap>Resample trades</option><option value=shuffle>Shuffle order</option></select><button onclick="mc()">Run Monte Carlo</button></div>
 <div class=row style="margin-top:14px"><button class=pri onclick="run()">Run backtest</button><button onclick="opt()">Optimize</button></div><div id=msg></div></aside>
-<main><div class=cards id=cards></div><div class=row id=ctb></div><div class=row id=leg></div><div id=gxi class=sub style="margin:2px 0 6px"></div><div class=ch id=pc></div><div id=osc></div><div class=ch id=ec style="height:220px"></div>
+<main><div class=cards id=cards></div><div class=row id=ctb></div><div class=row id=leg></div><div id=gxi class=sub style="margin:2px 0 6px"></div><div class=ch id=pc></div><div id=osc></div><div class=row id=etb></div><div class=ch id=ec style="height:260px"></div>
 <div id=mcres></div><div id=ores></div><h2>Trades</h2><div class=box id=T></div></main>
 <script>
 const $=id=>document.getElementById(id);
@@ -120,15 +120,15 @@ async function chat(){const i=$('ci'),m=i.value.trim();if(!m)return;i.value='';s
  try{const d=await post('/api/chat',{message:m,strategy:S,symbol:$('sym').value,interval:$('tf').value});
   say('a',d.reply+(d.mode==='ai'?'':''));if(d.changed){S={...S,...d.strategy};if(d.symbol)$('sym').value=d.symbol;if(d.interval)$('tf').value=d.interval;OP=[];render();busy('');run()}else busy('')}
  catch(e){say('a','⚠ '+e.message);busy('')}}
-const mk=el=>LightweightCharts.createChart(el,{autoSize:true,layout:{background:{color:'transparent'},textColor:'#9aa4b2'},grid:{vertLines:{color:'#1c2430'},horzLines:{color:'#1c2430'}},timeScale:{timeVisible:true},rightPriceScale:{borderColor:'#2a3442'}});
+const mk=(el,x={})=>LightweightCharts.createChart(el,{autoSize:true,layout:{background:{color:'transparent'},textColor:'#9aa4b2'},grid:{vertLines:{color:'#1c2430'},horzLines:{color:'#1c2430'}},timeScale:{timeVisible:true,...(x.ts||{})},rightPriceScale:{borderColor:'#2a3442'},...(x.o||{})});
 let pc,ec,cs,eqs;
 function show(d){histAdd(d.metrics);const m=d.metrics,f=(v,s='')=>`<span class="${v>=0?'pos':'neg'}">${v}${s}</span>`;
- $('cards').innerHTML=[['Net return',f(m.ret,'%')],['Buy & hold',f(m.bh,'%')],['Max drawdown',f(m.dd,'%')],['Win rate',m.win+'%'],['Profit factor',m.pf],['Sharpe',m.sharpe],['Trades',m.trades,`${m.nw} wins / ${m.trades-m.nw} losses`],['Avg R:R',m.rr,`avg win ${m.aw}% · avg loss ${m.al}%`],['Max win streak',m.mws??'–',`${m.mws??0} wins in a row · P&L +${m.mws_pnl??0}`],['Max loss streak',m.mls??'–',`${m.mls??0} losses in a row · P&L ${m.mls_pnl??0}`],['Avg trade',f(m.avg,'%')],['Final equity',m.final]].map(([a,b,c])=>`<div class=card><small>${a}</small><b>${b}</b>${c?`<small>${c}</small>`:''}</div>`).join('');
- eqs.applyOptions({baseValue:{type:'price',price:+S.capital||10000}});cs.setData(d.candles);eqs.setData(d.equity);LASTC=d.candles;drawOv(d.overlays||[]);ctbRender();
+ $('cards').innerHTML=[['Net return',f(m.ret,'%')],['Buy & hold',f(m.bh,'%')],['Max drawdown',f(m.dd,'%')],['Win rate',m.win+'%'],['Profit factor',m.pf],['Sharpe',m.sharpe],['Trades',m.trades,`${m.nw} wins / ${m.trades-m.nw} losses`],['Avg R:R',m.rr,`avg win ${m.aw}% · avg loss ${m.al}%`],['Max win streak',m.mws??'–',`${m.mws??0} wins in a row · P&L +${m.mws_pnl??0}`],['Max loss streak',m.mls??'–',`${m.mls??0} losses in a row · P&L ${m.mls_pnl??0}`],['Avg trade',f(m.avg,'%')],['Net P&L',f(+(m.final-(+S.capital||10000)).toFixed(2),'')],['Final equity',m.final]].map(([a,b,c])=>`<div class=card><small>${a}</small><b>${b}</b>${c?`<small>${c}</small>`:''}</div>`).join('');
+ cs.setData(d.candles);LASTD=d;drawEq();LASTC=d.candles;drawOv(d.overlays||[]);ctbRender();
  const mk2=[];d.trades.forEach(t=>{const L=t.side==='long';mk2.push({time:t.t0,position:L?'belowBar':'aboveBar',color:'#3b82f6',shape:L?'arrowUp':'arrowDown'},{time:t.t1,position:L?'aboveBar':'belowBar',color:t.pnl>0?'#22c55e':'#ef4444',shape:'circle'})});
  cs.setMarkers(mk2.sort((a,b)=>a.time-b.time));const fit=()=>{pc.timeScale().fitContent();ec.timeScale().fitContent()};fit();setTimeout(fit,80);
  $('T').innerHTML=`<table><tr><th>#</th><th>Side</th><th>Entry time</th><th>Entry</th><th>Exit</th><th>PnL</th><th>%</th><th>Exit by</th></tr>`+d.trades.map((t,i)=>[i+1,t,t]).reverse().map(([i,t])=>`<tr><td>${i}</td><td>${t.side}</td><td>${new Date(t.t0*1000).toLocaleString()}</td><td>${t.entry.toFixed(4)}</td><td>${t.exit.toFixed(4)}</td><td class="${t.pnl>=0?'pos':'neg'}">${t.pnl.toFixed(2)}</td><td>${t.pct.toFixed(2)}</td><td>${t.why}</td></tr>`).join('')+`</table>`}
-pc=mk($('pc'));ec=mk($('ec'));cs=pc.addCandlestickSeries();eqs=ec.addBaselineSeries({baseValue:{type:'price',price:10000},lineWidth:2,topLineColor:'#22c55e',topFillColor1:'rgba(34,197,94,.28)',topFillColor2:'rgba(34,197,94,.02)',bottomLineColor:'#ef4444',bottomFillColor1:'rgba(239,68,68,.02)',bottomFillColor2:'rgba(239,68,68,.28)'});
+pc=mk($('pc'));ec=mk($('ec'),{ts:{fixLeftEdge:true,fixRightEdge:true,rightOffset:0,lockVisibleTimeRangeOnResize:false},o:{handleScroll:false,handleScale:false}});cs=pc.addCandlestickSeries();eqs=ec.addBaselineSeries({baseValue:{type:'price',price:10000},lineWidth:2,topLineColor:'#22c55e',topFillColor1:'rgba(34,197,94,.28)',topFillColor2:'rgba(34,197,94,.02)',bottomLineColor:'#ef4444',bottomFillColor1:'rgba(239,68,68,.02)',bottomFillColor2:'rgba(239,68,68,.28)'});
 const SK='quantlab_saved',HK='quantlab_hist';let LT='tpl',LASTM=null,LASTK='';
 const rd=(k,d)=>{try{return JSON.parse(localStorage.getItem(k)||d)}catch(e){return JSON.parse(d)}};
 const wr=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){busy('⚠ Browser storage full or unavailable — use Backup all')}};
@@ -157,6 +157,7 @@ function histClear(){if(confirm('Clear all history? (Templates are kept)')){wr(H
 const dl=(o,f)=>{const b=new Blob([JSON.stringify(o,null,1)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=f;a.click()};
 const svExport=()=>dl(snap(),'quantlab_'+$('sym').value+'.json'),svBackup=()=>dl({templates:svAll(),history:histAll()},'quantlab_backup.json');
 function svImport(i){const f=i.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{const d=JSON.parse(r.result);if(d.templates){wr(SK,{...svAll(),...d.templates});wr(HK,[...histAll(),...(d.history||[])].sort((a,b)=>b.t-a.t).slice(0,100));libRender();busy('Backup imported')}else{svApply(d);busy('Imported '+f.name)}}catch(e){busy('⚠ '+e.message)}};r.readAsText(f);i.value=''}
+try{new ResizeObserver(()=>{ec.timeScale().fitContent()}).observe($('ec'))}catch(e){}
 const CX=rd('quantlab_cx','[]');
 const COL=['#f59e0b','#22d3ee','#a78bfa','#f472b6','#34d399','#fb923c','#60a5fa','#e879f9'];
 const PANEJS={rsi:'RSI',stoch:'Stochastic',cci:'CCI',roc:'ROC',macd:'MACD',macd_sig:'MACD',adx:'ADX',plus_di:'ADX',minus_di:'ADX',atr:'ATR',body_pct:'Candle %',range_pct:'Candle %'};
@@ -190,6 +191,13 @@ async function gexLoad(){const c=$('sym').value.toUpperCase().startsWith('BTC')?
  catch(e){busy('⚠ '+e.message);GXON=false;gxClear();ctbRender()}}
 function toggleGex(){GXON=!GXON;ctbRender();if(GXON)gexLoad();else gxClear()}
 function gexDays(v){GXD=+v;wr('quantlab_gxd',GXD);if(GXON)gexLoad()}
+let EQM=rd('quantlab_eqm','"pnl"'),LASTD=null;
+function drawEq(){const d=LASTD;if(!d||!d.candles.length)return;const cap=+S.capital||10000;
+ if(EQM==='pnl'){let c=0;const pts=[{time:d.candles[0].time,value:0}];[...d.trades].sort((a,b)=>a.t1-b.t1).forEach(t=>{c+=t.pnl;const v=Math.round(c*100)/100,l=pts[pts.length-1];if(l.time===t.t1)l.value=v;else pts.push({time:t.t1,value:v})});const lt=d.candles[d.candles.length-1].time,lp=pts[pts.length-1];if(lt>lp.time)pts.push({time:lt,value:lp.value});
+  eqs.applyOptions({baseValue:{type:'price',price:0}});eqs.setData(pts)}
+ else{eqs.applyOptions({baseValue:{type:'price',price:cap}});eqs.setData(d.equity)}
+ $('etb').innerHTML=`<button class="${EQM==='pnl'?'on':''}" onclick="setEqm('pnl')">Cumulative P&amp;L (closed trades)</button><button class="${EQM==='eq'?'on':''}" onclick="setEqm('eq')">Equity (live, incl. open trade)</button>`;ec.timeScale().fitContent();requestAnimationFrame(()=>ec.timeScale().fitContent())}
+function setEqm(m){EQM=m;wr('quantlab_eqm',m);drawEq()}
 $('pre').innerHTML=Object.keys(PRE).map(k=>`<option>${k}</option>`).join('');
 $('tf').innerHTML=['1m','3m','5m','15m','30m','1h','2h','4h','1d'].map(k=>`<option ${k==='1h'?'selected':''}>${k}</option>`).join('');
 usePreset(Object.keys(PRE)[0]);libRender();ctbRender();say('a','Hi! Apni strategy words mein likho, jaise: “long when ema 9 crosses above ema 21 and rsi below 70, exit when rsi above 80, sl 1% tp 2%”. Candle patterns (hammer, bullish engulfing), previous day high/low, opening range (“15 min opening range from 13:30 utc”), volume profile (poc, vah, val), supertrend, adx, stoch, time window (between 8 and 20 utc) sab chalte hain. “new strategy” se reset.');
