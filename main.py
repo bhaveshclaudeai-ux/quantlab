@@ -276,6 +276,7 @@ CATALOG = {
     "Momentum": {"rsi": 1, "macd": 0, "macd_sig": 0, "stoch": 1, "cci": 1, "roc": 1},
     "Volatility": {"atr": 1, "bb_up": 1, "bb_lo": 1, "body_pct": 0, "range_pct": 0},
     "Volume": {"vol_sma": 1},
+    "VWAP bands": {"vwap_up1": 0, "vwap_lo1": 0, "vwap_up2": 0, "vwap_lo2": 0, "vwap_up3": 0, "vwap_lo3": 0},
     "Opening range": {"or_high": 3, "or_low": 3},
     "Volume profile": {"vp_poc": 1, "vp_vah": 1, "vp_val": 1},
     "Price action": {"day_open": 0, "day_high": 0, "day_low": 0, "pw_high": 0, "pw_low": 0, "prev_high": 0, "prev_low": 0, "prev_close": 0, "pd_high": 0, "pd_low": 0, "pd_close": 0,
@@ -370,6 +371,12 @@ def ind(df, k, p, q=None):
         day = _dk(df)
         tp = (h + l + c) / 3
         s = (tp * v).groupby(day).cumsum() / v.groupby(day).cumsum()
+    elif k.startswith(("vwap_up", "vwap_lo")):  # daily VWAP +/- n volume-weighted standard deviations
+        dkx, tp = _dk(df), (h + l + c) / 3
+        cv = v.groupby(dkx).cumsum().replace(0, np.nan)
+        vw = (tp * v).groupby(dkx).cumsum() / cv
+        sd = np.sqrt(((tp * tp * v).groupby(dkx).cumsum() / cv - vw * vw).clip(lower=0))
+        s = vw + int(k[-1]) * sd if k.startswith("vwap_up") else vw - int(k[-1]) * sd
     elif k == "stoch":
         s = 100 * (c - l.rolling(p).min()) / (h.rolling(p).max() - l.rolling(p).min()).replace(0, np.nan)
     elif k == "cci":
@@ -766,6 +773,12 @@ ALIAS += [("opening range high", "or_high"), ("opening range low", "or_low"), ("
           ("day open", "day_open"), ("today open", "day_open"), ("day high", "day_high"), ("today high", "day_high"),
           ("day low", "day_low"), ("today low", "day_low"), ("previous week high", "pw_high"), ("previous week low", "pw_low"),
           ("last week high", "pw_high"), ("last week low", "pw_low"), ("pw high", "pw_high"), ("pw low", "pw_low")]
+for _n in (1, 2, 3):
+    for _a, _k in ((f"vwap upper band {_n}", f"vwap_up{_n}"), (f"vwap lower band {_n}", f"vwap_lo{_n}"),
+                   (f"upper vwap band {_n}", f"vwap_up{_n}"), (f"lower vwap band {_n}", f"vwap_lo{_n}"),
+                   (f"vwap band {_n} upper", f"vwap_up{_n}"), (f"vwap band {_n} lower", f"vwap_lo{_n}")):
+        ALIAS.append((_a, _k))
+ALIAS += [("vwap upper band", "vwap_up1"), ("vwap lower band", "vwap_lo1"), ("upper vwap band", "vwap_up1"), ("lower vwap band", "vwap_lo1")]
 ALIASD = dict(ALIAS)
 PHR = {"bullish engulfing": "bull_engulf", "bearish engulfing": "bear_engulf", "hammer": "hammer",
        "shooting star": "shooting_star", "doji": "doji", "inside bar": "inside_bar", "bullish candle": "bull_candle",
@@ -833,7 +846,11 @@ def clean_strategy(st, cur):
             out[k] = max(0.0, min(float(st[k]), hi))
     return out
 
+VLAB = {f"vwap_{d}{n}": f"VWAP {'upper' if d == 'up' else 'lower'} band {n}" for d in ("up", "lo") for n in (1, 2, 3)}
+
 def _dsc(o):
+    if o["k"] in VLAB:
+        return VLAB[o["k"]]
     return f"{o['v']:g}" if o["k"] == "num" else o["k"].upper() + (f" {o['p']}" if "p" in o else "") + (f" @{o['q']:g}h UTC" if "q" in o else "")
 
 PNAME = {"bull_candle": "Green candle", "bear_candle": "Red candle", "bull_engulf": "Bullish engulfing", "bear_engulf": "Bearish engulfing",
@@ -1026,7 +1043,7 @@ def _ai_sys():
             "hour is the UTC hour 0-23 (hours 8 to 19 means hour > 7.5 AND hour < 19.5); dow 0=Monday. pd_* are previous UTC day values, prev_* the previous candle; "
             "hh/ll are the highest high / lowest low of the previous p candles (breakout: close > hh). supertrend is bullish when close > supertrend. "
             "or_high/or_low = opening range high/low: p = range length in minutes, q = start hour in UTC (decimal, e.g. 13.5 = 13:30; 9:15 IST = 3.75); valid only after the range completes each UTC day; the timeframe should not be larger than p. "
-            "vp_poc/vp_vah/vp_val = point of control / value-area high / value-area low (70%) of the volume profile built from the previous p days. day_open/day_high/day_low are today's values so far; pw_* previous week. "
+            "vp_poc/vp_vah/vp_val = point of control / value-area high / value-area low (70%) of the volume profile built from the previous p days. day_open/day_high/day_low are today's values so far; pw_* previous week. vwap_up1..3 / vwap_lo1..3 = daily VWAP plus or minus 1, 2, 3 volume-weighted standard deviations. "
             "Entries fill at the next candle open. When the user asks to change or add something, keep the rest of the current strategy; if they ask for a new strategy, replace everything. "
             "Exits are optional (SL/TP can be the only exit). If something cannot be expressed with these kinds, use the closest and say so in reply.")
 
