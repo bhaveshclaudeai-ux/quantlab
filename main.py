@@ -426,9 +426,13 @@ class OptReq(Req):
     min_trades: int = 10
 
 def prep(q):
-    sym = q.symbol.upper().strip()
+    sym = re.sub(r"[^A-Z0-9]", "", q.symbol.upper())          # BTC/USDT, btc-usdt -> BTCUSDT
+    if sym and len(sym) <= 5 and not sym.endswith(("USDT", "USDC", "BTC")):
+        sym += "USDT"                                         # "BTC" -> BTCUSDT
+    q.interval = {"60m": "1h", "240m": "4h", "1440m": "1d", "h": "1h", "hour": "1h", "d": "1d", "day": "1d", "daily": "1d"}.get(
+        q.interval.strip().lower(), q.interval.strip().lower())
     if q.interval not in TF or not re.fullmatch(r"[A-Z0-9]{5,20}", sym):
-        raise HTTPException(400, "Bad symbol or interval")
+        raise HTTPException(400, f"Bad symbol or interval (got symbol='{q.symbol}', interval='{q.interval}'). Use a pair like BTCUSDT and a timeframe like 1h")
     if q.start or q.end:
         try:
             a = int(pd.Timestamp(q.start, tz="UTC").timestamp() * 1000) if q.start else None
