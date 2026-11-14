@@ -30,7 +30,9 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:5px 8px;b
 <div id=lib class=box style="padding:4px 8px;margin:6px 0"></div>
 <div class=row><button onclick="tplSave()">★ Save template</button><button onclick="svExport()">Export current</button><button onclick="svBackup()">Backup all</button><button onclick="$('imp').click()">Import</button><button onclick="histClear()">Clear history</button><input id=imp type=file accept=".json,application/json" hidden onchange="svImport(this)"></div>
 <h3>Market (Binance)</h3>
-<div class=row><input id=sym list=sy value=BTCUSDT style="width:130px"><datalist id=sy></datalist><select id=tf></select><input id=n type=number value=3000 title="Candles (max 20000)"></div>
+<div class=row><input id=sym list=sy value=BTCUSDT style="width:130px"><datalist id=sy><option value=NQ><option value=ES><option value=GOLD></datalist><select id=tf></select><input id=n type=number value=3000 title="Candles (max 20000)"></div>
+<div class=row id=qs><button onclick="$('sym').value='NQ';ctbRender()">NQ</button><button onclick="$('sym').value='ES';ctbRender()">S&amp;P (ES)</button><button onclick="$('sym').value='GOLD';ctbRender()">Gold</button><button onclick="$('sym').value='BTCUSDT';ctbRender()">BTC</button><button onclick="$('sym').value='ETHUSDT';ctbRender()">ETH</button></div>
+<div class=sub>NQ / S&amp;P / Gold = CME futures from Yahoo Finance (trading day starts 18:00 New York). Intraday history is limited: 1m ≈ 6 days, 5–30m ≈ 59 days, 1h ≈ 2 years, 1d = many years. 3m/2h/4h are built from smaller candles.</div>
 <div class=row style="font-size:12px;color:var(--m)">From <input id=d1 type=date style="width:142px"> To <input id=d2 type=date style="width:142px"></div><div class=sub>Dates override the candle count (max 20,000 candles). Empty = latest candles.</div>
 <h3>Direction</h3>
 <select id=dir onchange="S.direction=this.value"><option value=long>Long only</option><option value=short>Short only</option><option value=both>Long + Short</option></select>
@@ -201,5 +203,5 @@ function setEqm(m){EQM=m;wr('quantlab_eqm',m);drawEq()}
 $('pre').innerHTML=Object.keys(PRE).map(k=>`<option>${k}</option>`).join('');
 $('tf').innerHTML=['1m','3m','5m','15m','30m','1h','2h','4h','1d'].map(k=>`<option ${k==='1h'?'selected':''}>${k}</option>`).join('');
 usePreset(Object.keys(PRE)[0]);libRender();ctbRender();say('a','Hi! Apni strategy words mein likho, jaise: “long when ema 9 crosses above ema 21 and rsi below 70, exit when rsi above 80, sl 1% tp 2%”. Candle patterns (hammer, bullish engulfing), previous day high/low, opening range (“15 min opening range from 13:30 utc”), volume profile (poc, vah, val), supertrend, adx, stoch, time window (between 8 and 20 utc) sab chalte hain. “new strategy” se reset.');
-fetch('/api/symbols').then(r=>r.json()).then(s=>$('sy').innerHTML=s.map(x=>`<option value=${x}>`).join('')).catch(()=>{});
+fetch('/api/symbols').then(r=>r.json()).then(s=>$('sy').innerHTML='<option value=NQ><option value=ES><option value=GOLD>'+s.map(x=>`<option value=${x}>`).join('')).catch(()=>{});
 </script></body></html>

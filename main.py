@@ -90,6 +90,71 @@ def load_range(sym, tf, a, b, cap=20000):
     CACHE[key] = (time.time(), df)
     return df
 
+# ---------------- futures / gold via Yahoo Finance (NQ, S&P 500, Gold) ----------------
+YF = {"NQ": "NQ=F", "NQ1": "NQ=F", "NASDAQ": "NQ=F", "NASDAQ100": "NQ=F", "NDX": "NQ=F", "MNQ": "MNQ=F",
+      "ES": "ES=F", "ES1": "ES=F", "SPX": "ES=F", "SPX500": "ES=F", "SP500": "ES=F", "SNP": "ES=F", "SNP500": "ES=F", "MES": "MES=F",
+      "GOLD": "GC=F", "GC": "GC=F", "GC1": "GC=F", "XAU": "GC=F", "XAUUSD": "GC=F", "MGC": "MGC=F"}
+YLIM = {"1m": ("1m", 6), "3m": ("1m", 6), "5m": ("5m", 59), "15m": ("15m", 59), "30m": ("30m", 59),
+        "1h": ("60m", 729), "2h": ("60m", 729), "4h": ("60m", 729), "1d": ("1d", 36500)}
+RESAMPLE = {"3m": "3min", "2h": "2h", "4h": "4h"}
+
+def _yahoo_get(tick, interval, p1, p2):
+    err = None
+    for host in ("query1", "query2"):
+        try:
+            r = requests.get(f"https://{host}.finance.yahoo.com/v8/finance/chart/{tick}", timeout=25,
+                             params={"interval": interval, "period1": int(p1), "period2": int(p2)},
+                             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"})
+            ch = r.json().get("chart", {})
+            if ch.get("error"):
+                err = ch["error"].get("description") or str(ch["error"])
+                continue
+            res = (ch.get("result") or [None])[0]
+            if res and res.get("timestamp"):
+                return res
+            err = "no data returned"
+        except Exception as e:
+            err = str(e)
+    raise HTTPException(502, f"Yahoo data error for {tick}: {str(err)[:140]}")
+
+def load_yahoo(tick, tf, n, a=None, b=None):
+    """NQ / ES / Gold futures candles. dk = CME trading day (a new day starts 18:00 New York time)."""
+    key = (tick, tf, n if (a is None and b is None) else 0, a, b)
+    c = CACHE.get(key)
+    if c and time.time() - c[0] < 300:
+        return c[1]
+    yi, lim = YLIM[tf]
+    now = time.time()
+    p2 = min(b / 1000, now) if b else now
+    p1 = max((a / 1000) if a else p2 - lim * 86400, now - lim * 86400)   # Yahoo keeps only limited intraday history
+    if p1 >= p2:
+        raise HTTPException(400, f"That date range is outside Yahoo's history for {tf} candles (1m ~6 days, 5-30m ~59 days, 1h ~2 years)")
+    res = _yahoo_get(tick, yi, p1, p2)
+    qd = res["indicators"]["quote"][0]
+    df = pd.DataFrame({"t": res["timestamp"], "open": qd["open"], "high": qd["high"], "low": qd["low"], "close": qd["close"], "volume": qd.get("volume") or 0})
+    df = df.dropna(subset=["open", "high", "low", "close"])
+    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
+    df = df.astype(float)
+    if tf in RESAMPLE:
+        g = df.set_index(pd.to_datetime(df["t"], unit="s", utc=True)).drop(columns="t").resample(RESAMPLE[tf], origin="start_day").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna(subset=["open"])
+        df = g.reset_index(drop=True)
+        df.insert(0, "t", ((g.index - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(seconds=1)).astype(float))
+    df["t"] = df["t"].astype(int)
+    df = df[df["t"] + TF[tf] * 60 <= now].reset_index(drop=True)          # drop the candle still forming
+    if len(df) < 100:
+        raise HTTPException(400, f"Only {len(df)} candles available from Yahoo for {tf} (history: 1m ~6 days, 5-30m ~59 days, 1h ~2 years). Try a bigger timeframe or an earlier date.")
+    loc = pd.to_datetime(df["t"], unit="s", utc=True).dt.tz_convert("America/New_York").dt.tz_localize(None) + pd.Timedelta(hours=6)
+    df["dk"] = (loc.dt.normalize() - pd.Timestamp("1970-01-01")).dt.days.astype(int)
+    if a is None and b is None:
+        df = df.tail(n).reset_index(drop=True)
+    CACHE[key] = (time.time(), df)
+    return df
+
+def _dk(df):
+    """Trading-day index: UTC day for crypto, CME session day for futures."""
+    return df["dk"] if "dk" in df else df["t"] // 86400
+
 # ---------------- indicators / signals ----------------
 CATALOG = {
     "Price": {"close": 0, "open": 0, "high": 0, "low": 0, "volume": 0},
@@ -120,7 +185,7 @@ def _vp(df, p, bins=100, va=0.7):
     if key in _VP:
         return _VP[key]
     t, h, l, v = df["t"].to_numpy(), df["high"].to_numpy(), df["low"].to_numpy(), df["volume"].to_numpy()
-    ds = np.r_[0, np.flatnonzero(np.diff(t // 86400)) + 1, len(t)]
+    ds = np.r_[0, np.flatnonzero(np.diff(_dk(df).to_numpy())) + 1, len(t)]
     poc, vah, val = (np.full(len(t), np.nan) for _ in range(3))
     for j in range(1, len(ds) - 1):
         a, b = ds[max(0, j - p)], ds[j]
@@ -188,7 +253,7 @@ def ind(df, k, p, q=None):
     elif k == "hh": s = h.rolling(p).max().shift(1)   # highest high of previous p bars
     elif k == "ll": s = l.rolling(p).min().shift(1)
     elif k == "vwap":  # resets every UTC day
-        day = df["t"] // 86400
+        day = _dk(df)
         tp = (h + l + c) / 3
         s = (tp * v).groupby(day).cumsum() / v.groupby(day).cumsum()
     elif k == "stoch":
@@ -218,7 +283,7 @@ def ind(df, k, p, q=None):
         s = pd.Series(st)
     elif k in ("prev_high", "prev_low", "prev_close"): s = df[k[5:]].shift(1)
     elif k in ("pd_high", "pd_low", "pd_close"):
-        day = df["t"] // 86400
+        day = _dk(df)
         dv = df.groupby(day)[k[3:]].agg({"pd_high": "max", "pd_low": "min", "pd_close": "last"}[k])
         s = day.map(dv.shift(1))
     elif k == "body_pct": s = (c - df["open"]).abs() / df["open"] * 100
@@ -232,12 +297,12 @@ def ind(df, k, p, q=None):
         s = ob.groupby(day).transform("max" if k == "or_high" else "min").where(df["t"] >= we)
     elif k in ("vp_poc", "vp_vah", "vp_val"):  # previous p days' volume profile
         s = pd.Series(_vp(df, min(p, 30))[("vp_poc", "vp_vah", "vp_val").index(k)], index=df.index)
-    elif k == "day_open": s = df["open"].groupby(df["t"] // 86400).transform("first")
+    elif k == "day_open": s = df["open"].groupby(_dk(df)).transform("first")
     elif k in ("day_high", "day_low"):  # today's high/low so far, excluding the current candle
-        g = (h if k == "day_high" else l).groupby(df["t"] // 86400)
-        s = (g.cummax() if k == "day_high" else g.cummin()).groupby(df["t"] // 86400).shift(1)
+        g = (h if k == "day_high" else l).groupby(_dk(df))
+        s = (g.cummax() if k == "day_high" else g.cummin()).groupby(_dk(df)).shift(1)
     elif k in ("pw_high", "pw_low"):
-        wk = (df["t"] // 86400 + 3) // 7
+        wk = (_dk(df) + 3) // 7
         dv = df.groupby(wk)[k[3:]].agg("max" if k == "pw_high" else "min")
         s = wk.map(dv.shift(1))
     elif k == "hour": s = ((df["t"] % 86400) // 3600).astype(float)
@@ -314,6 +379,7 @@ def backtest(df, s):
     rr = float(s.get("rr") or 1)
     stop_tp, max_td = bool(s.get("stop_after_tp")), int(s.get("max_trades_day") or 0)
     blocked, tcount, sl_px, tp_px = -1, {}, None, None
+    dkv = _dk(df).to_numpy()
     equity, trades = np.full(n, cap0), []
 
     def close(i, px, why):
@@ -325,7 +391,7 @@ def backtest(df, s):
                            entry=float(ent), exit=float(px), pnl=float(pnl), pct=float(pnl / (qty * ent) * 100), ret=float(pnl / eq0), why=why))
         pos = 0
         if why == "tp" and stop_tp:
-            blocked = int(t[i] // 86400)
+            blocked = int(dkv[i])
 
     for i in range(1, n):
         if eq <= 0:
@@ -339,7 +405,7 @@ def backtest(df, s):
             close(i, o[i], "signal")
         elif pos < 0 and ((xs is not None and xs[i - 1]) or (rev and wl and not ws)):
             close(i, o[i], "signal")
-        day = int(t[i] // 86400)
+        day = int(dkv[i])
         if pos == 0 and (wl or ws) and day != blocked and not (max_td and tcount.get(day, 0) >= max_td):
             side, px = 0, o[i]
             if not entry_break:
@@ -425,20 +491,31 @@ class OptReq(Req):
     metric: str = "return_dd"
     min_trades: int = 10
 
+def _dates(q):
+    if not (q.start or q.end):
+        return None, None
+    try:
+        a = int(pd.Timestamp(q.start, tz="UTC").timestamp() * 1000) if q.start else None
+        b = int((pd.Timestamp(q.end, tz="UTC").timestamp() + 86400) * 1000) - 1 if q.end else None
+    except Exception:
+        raise HTTPException(400, "Bad date - use the date picker")
+    return a, b
+
 def prep(q):
-    sym = re.sub(r"[^A-Z0-9]", "", q.symbol.upper())          # BTC/USDT, btc-usdt -> BTCUSDT
-    if sym and len(sym) <= 5 and not sym.endswith(("USDT", "USDC", "BTC")):
-        sym += "USDT"                                         # "BTC" -> BTCUSDT
     q.interval = {"60m": "1h", "240m": "4h", "1440m": "1d", "h": "1h", "hour": "1h", "d": "1d", "day": "1d", "daily": "1d"}.get(
         q.interval.strip().lower(), q.interval.strip().lower())
+    raw = re.sub(r"[^A-Z0-9]", "", q.symbol.upper())
+    a, b = _dates(q)
+    if raw in YF:                                             # NQ, S&P 500 (ES), Gold
+        if q.interval not in TF:
+            raise HTTPException(400, f"Bad timeframe '{q.interval}'")
+        return load_yahoo(YF[raw], q.interval, max(200, min(q.candles, 20000)), a, b)
+    sym = raw
+    if sym and len(sym) <= 5 and not sym.endswith(("USDT", "USDC", "BTC")):
+        sym += "USDT"                                         # "BTC" -> BTCUSDT
     if q.interval not in TF or not re.fullmatch(r"[A-Z0-9]{5,20}", sym):
-        raise HTTPException(400, f"Bad symbol or interval (got symbol='{q.symbol}', interval='{q.interval}'). Use a pair like BTCUSDT and a timeframe like 1h")
-    if q.start or q.end:
-        try:
-            a = int(pd.Timestamp(q.start, tz="UTC").timestamp() * 1000) if q.start else None
-            b = int((pd.Timestamp(q.end, tz="UTC").timestamp() + 86400) * 1000) - 1 if q.end else None
-        except Exception:
-            raise HTTPException(400, "Bad date - use the date picker")
+        raise HTTPException(400, f"Bad symbol or interval (got symbol='{q.symbol}', interval='{q.interval}'). Use a pair like BTCUSDT (or NQ, ES, GOLD) and a timeframe like 1h")
+    if a is not None or b is not None:
         return load_range(sym, q.interval, a, b)
     return load(sym, q.interval, max(200, min(q.candles, 20000)))
 
@@ -797,8 +874,9 @@ def basic_parse(msg, cur):
     sym = iv = None
     ms = re.search(r"\b([a-z0-9]{2,10}(?:usdt|usdc|btc))\b", t)
     coins = {"btc": "BTCUSDT", "bitcoin": "BTCUSDT", "eth": "ETHUSDT", "ethereum": "ETHUSDT", "sol": "SOLUSDT", "solana": "SOLUSDT",
-             "bnb": "BNBUSDT", "xrp": "XRPUSDT", "doge": "DOGEUSDT"}
-    mc = re.search(r"\b(btc|bitcoin|eth|ethereum|sol|solana|bnb|xrp|doge)\b", t)
+             "bnb": "BNBUSDT", "xrp": "XRPUSDT", "doge": "DOGEUSDT",
+             "nq": "NQ", "nasdaq": "NQ", "snp": "ES", "sp500": "ES", "spx": "ES", "s&p": "ES", "gold": "GOLD", "xau": "GOLD", "xauusd": "GOLD"}
+    mc = re.search(r"\b(btc|bitcoin|eth|ethereum|sol|solana|bnb|xrp|doge|nq|nasdaq|snp|sp500|spx|s&p|gold|xau|xauusd)\b", t)
     sym = ms.group(1).upper() if ms else coins[mc.group(1)] if mc else None
     mi = re.search(r"\b(1m|3m|5m|15m|30m|1h|2h|4h|1d)\b", t)
     iv = mi.group(1) if mi else "1d" if "daily" in t else "1h" if "hourly" in t else None
