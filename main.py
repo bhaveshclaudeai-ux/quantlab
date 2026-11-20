@@ -9,7 +9,7 @@ app = FastAPI(title="QuantLab")
 HERE = os.path.dirname(os.path.abspath(__file__))
 BASES = ["https://data-api.binance.vision", "https://api.binance.com", "https://api1.binance.com", "https://api.binance.us"]
 TF = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "2h": 120, "4h": 240, "1d": 1440}
-GROUPS = ("entry_long", "exit_long", "entry_short", "exit_short")
+GROUPS = ("arm_long", "entry_long", "exit_long", "arm_short", "entry_short", "exit_short")
 CACHE = {}
 
 # ---------------- data ----------------
@@ -272,7 +272,7 @@ def load_csv(key, tf, n, a, b):
 # ---------------- indicators / signals ----------------
 CATALOG = {
     "Price": {"close": 0, "open": 0, "high": 0, "low": 0, "volume": 0},
-    "Trend": {"ema": 1, "sma": 1, "supertrend": 1, "vwap": 0, "adx": 1, "plus_di": 1, "minus_di": 1, "hh": 1, "ll": 1},
+    "Trend": {"ema": 1, "sma": 1, "supertrend": 1, "vwap": 0, "vwap_h": 0, "vwap_l": 0, "adx": 1, "plus_di": 1, "minus_di": 1, "hh": 1, "ll": 1},
     "Momentum": {"rsi": 1, "macd": 0, "macd_sig": 0, "stoch": 1, "cci": 1, "roc": 1},
     "Volatility": {"atr": 1, "bb_up": 1, "bb_lo": 1, "body_pct": 0, "range_pct": 0},
     "Volume": {"vol_sma": 1},
@@ -371,6 +371,8 @@ def ind(df, k, p, q=None):
         day = _dk(df)
         tp = (h + l + c) / 3
         s = (tp * v).groupby(day).cumsum() / v.groupby(day).cumsum()
+    elif k in ("vwap_h", "vwap_l"):  # daily anchored VWAP of the HIGHS / of the LOWS
+        s = ((h if k == "vwap_h" else l) * v).groupby(_dk(df)).cumsum() / v.groupby(_dk(df)).cumsum().replace(0, np.nan)
     elif k.startswith(("vwap_up", "vwap_lo")):  # daily VWAP +/- n volume-weighted standard deviations
         dkx, tp = _dk(df), (h + l + c) / 3
         cv = v.groupby(dkx).cumsum().replace(0, np.nan)
@@ -483,7 +485,128 @@ def _ov(df, q):
         return []
 
 # ---------------- backtest ----------------
+def backtest_pro(df, s):
+    """Engine for 'armed setup' strategies (arm -> trigger candle -> NEXT candle must break it), hedge mode (long and short open
+    together), no-weekend and max-stop-losses-per-day rules. Exits happen exactly at the SL / TP price (SL first)."""
+    cache = {}
+    sig = {g: group(df, s.get(g) or {}, cache) for g in GROUPS}
+    o, h, l, c, t = (df[k].to_numpy() for k in ("open", "high", "low", "close", "t"))
+    dkv, n = _dk(df).to_numpy(), len(df)
+    mode = s.get("direction", "long")
+    use = {1: mode in ("long", "both"), -1: mode in ("short", "both")}
+    sl, tp = float(s.get("sl_pct") or 0) / 100, float(s.get("tp_pct") or 0) / 100
+    fee, cap0 = float(s.get("fee_pct") or 0) / 100, float(s.get("capital") or 10000)
+    size = float(s.get("size_pct") or 100) / 100 * float(s.get("leverage") or 1)
+    rr, sl_candle, entry_break = float(s.get("rr") or 1), s.get("sl_mode") == "candle", s.get("entry_mode") == "break"
+    stop_tp, max_td, max_sl = bool(s.get("stop_after_tp")), int(s.get("max_trades_day") or 0), int(s.get("max_sl_day") or 0)
+    hedge, no_wk = bool(s.get("hedge")), bool(s.get("no_weekend"))
+    arm, esig, xsig = {1: sig["arm_long"], -1: sig["arm_short"]}, {1: sig["entry_long"], -1: sig["entry_short"]}, {1: sig["exit_long"], -1: sig["exit_short"]}
+    eq, equity, trades = cap0, np.full(n, cap0), []
+    P, state, trig = {1: None, -1: None}, {1: 0, -1: 0}, {1: None, -1: None}
+    cnt = dict(sl=0, tp=False)
+    tcount = {}
+
+    def close(sd, i, px, why):
+        nonlocal eq
+        p = P[sd]
+        gross = sd * p["qty"] * (px - p["ent"])
+        eq += gross - fee * p["qty"] * px
+        pnl = gross - fee * p["qty"] * (p["ent"] + px)
+        trades.append(dict(side="long" if sd > 0 else "short", t0=int(t[p["ei"]]), t1=int(t[i]), entry=float(p["ent"]), exit=float(px),
+                           pnl=float(pnl), pct=float(pnl / (p["qty"] * p["ent"]) * 100), ret=float(pnl / p["eq0"]), why=why))
+        P[sd] = None
+        if why == "sl": cnt["sl"] += 1
+        elif why == "tp": cnt["tp"] = True
+
+    def check(sd, i):
+        p = P[sd]
+        if sd > 0:
+            if p["sl"] is not None and l[i] <= p["sl"]: close(sd, i, p["sl"], "sl")
+            elif p["tp"] is not None and h[i] >= p["tp"]: close(sd, i, p["tp"], "tp")
+        else:
+            if p["sl"] is not None and h[i] >= p["sl"]: close(sd, i, p["sl"], "sl")
+            elif p["tp"] is not None and l[i] <= p["tp"]: close(sd, i, p["tp"], "tp")
+
+    def can(sd):
+        return P[sd] is None and (hedge or (P[1] is None and P[-1] is None))
+
+    def enter(sd, px, slp, i, day):
+        nonlocal eq
+        if sl_candle:
+            risk = abs(px - slp)
+            if risk <= 0:
+                return
+            sl_px, tp_px = slp, px + sd * rr * risk
+        else:
+            sl_px, tp_px = (px * (1 - sd * sl) if sl else None), (px * (1 + sd * tp) if tp else None)
+        qty = eq * size / px
+        P[sd] = dict(ent=px, qty=qty, sl=sl_px, tp=tp_px, ei=i, eq0=eq)
+        eq -= fee * qty * px
+        tcount[day] = tcount.get(day, 0) + 1
+
+    for i in range(1, n):
+        if eq <= 0:
+            equity[i:] = 0
+            break
+        day = int(dkv[i])
+        if day != dkv[i - 1]:                                   # new trading day
+            cnt["sl"], cnt["tp"] = 0, False
+            for sd in (1, -1):
+                if arm[sd] is not None:
+                    state[sd] = 0
+        for sd in (1, -1):                                      # exit rules (at the open)
+            if P[sd] and xsig[sd] is not None and xsig[sd][i - 1]:
+                close(sd, i, o[i], "signal")
+        for sd in (1, -1):                                      # SL / TP of trades opened on earlier candles
+            if P[sd] and P[sd]["ei"] < i:
+                check(sd, i)
+        allowed = not (no_wk and (day + 3) % 7 >= 5) and not (stop_tp and cnt["tp"]) and not (max_sl and cnt["sl"] >= max_sl) \
+            and not (max_td and tcount.get(day, 0) >= max_td)
+        for sd in (1, -1):
+            if not use[sd]:
+                continue
+            if arm[sd] is not None:                             # armed setup machine
+                st = state[sd]
+                if allowed:
+                    if st == 0:
+                        if arm[sd][i]:
+                            state[sd] = 1
+                    elif st == 1:
+                        if esig[sd] is None or esig[sd][i]:     # trigger candle
+                            trig[sd], state[sd] = (h[i], l[i], i), 2
+                    else:                                       # candle after the trigger: must break it
+                        th, tl, tb = trig[sd]
+                        if (h[i] > th) if sd > 0 else (l[i] < tl):
+                            if can(sd):
+                                enter(sd, max(th, o[i]) if sd > 0 else min(tl, o[i]), tl if sd > 0 else th, i, day)
+                            state[sd] = 0
+                if state[sd] == 2 and i > trig[sd][2]:          # setup is valid for ONE candle only
+                    state[sd] = 0
+                    if allowed and arm[sd][i]:
+                        state[sd] = 1
+            elif allowed and esig[sd] is not None and esig[sd][i - 1] and can(sd):
+                if not entry_break:
+                    enter(sd, o[i], l[i - 1] if sd > 0 else h[i - 1], i, day)
+                elif sd > 0 and h[i] > h[i - 1]:
+                    enter(sd, max(o[i], h[i - 1]), l[i - 1], i, day)
+                elif sd < 0 and l[i] < l[i - 1]:
+                    enter(sd, min(o[i], l[i - 1]), h[i - 1], i, day)
+        for sd in (1, -1):                                      # the entry candle itself can hit SL / TP (SL first)
+            if P[sd] and P[sd]["ei"] == i:
+                check(sd, i)
+        equity[i] = eq + sum(sd * P[sd]["qty"] * (c[i] - P[sd]["ent"]) for sd in (1, -1) if P[sd])
+    for sd in (1, -1):
+        if P[sd]:
+            close(sd, n - 1, c[n - 1], "end")
+    equity[-1] = eq
+    return equity, trades, cap0
+
+
+PRO_KEYS = ("hedge", "no_weekend", "max_sl_day")
+
 def backtest(df, s):
+    if (s.get("arm_long") or {}).get("rules") or (s.get("arm_short") or {}).get("rules") or any(s.get(k) for k in PRO_KEYS):
+        return backtest_pro(df, s)
     cache = {}
     sig = {g: group(df, s.get(g) or {}, cache) for g in GROUPS}
     mode = s.get("direction", "long")
@@ -779,6 +902,7 @@ for _n in (1, 2, 3):
                    (f"vwap band {_n} upper", f"vwap_up{_n}"), (f"vwap band {_n} lower", f"vwap_lo{_n}")):
         ALIAS.append((_a, _k))
 ALIAS += [("vwap upper band", "vwap_up1"), ("vwap lower band", "vwap_lo1"), ("upper vwap band", "vwap_up1"), ("lower vwap band", "vwap_lo1")]
+ALIAS += [("vwap high", "vwap_h"), ("vwap low", "vwap_l"), ("vwap of high", "vwap_h"), ("vwap of low", "vwap_l"), ("vwap of highs", "vwap_h"), ("vwap of lows", "vwap_l")]
 ALIASD = dict(ALIAS)
 PHR = {"bullish engulfing": "bull_engulf", "bearish engulfing": "bear_engulf", "hammer": "hammer",
        "shooting star": "shooting_star", "doji": "doji", "inside bar": "inside_bar", "bullish candle": "bull_candle",
@@ -791,7 +915,7 @@ _OPR = (r"(?:(?:cross(?:es|ed|ing)?|break(?:s|ing)?)\s+(?:above|over|up(?:\s+thr
         r"|(?:is\s+|goes\s+|closes\s+|close\s+|stays\s+)?(?:below|less than|lower than|under|<))")
 _CL = re.compile(r"(?P<a>%s)(?:\s*\(?\s*(?P<ap>\d+)\s*\)?)?\s+(?P<op>%s)\s+(?P<b>%s)(?:\s*\(?\s*(?P<bp>\d+)\s*\)?)?" % (_OPD, _OPR, _OPD))
 _EL = re.compile(r"(?:\band\b|\bor\b|,)\s*(?P<op>%s)\s+(?P<b>%s)(?:\s*\(?\s*(?P<bp>\d+)\s*\)?)?" % (_OPR, _OPD))
-_MARK = re.compile(r"\b(exit|square off|close (?:the )?(?:long|short|position|trade)|entry|enter|buy|sell|short|long)\b")
+_MARK = re.compile(r"\b(exit|square off|close (?:the )?(?:long|short|position|trade)|entry|enter|buy|sell|short|long|arm(?:ed|s|ing)?)\b")
 OPTXT = {">": "is above", "<": "is below", "x_up": "crosses above", "x_dn": "crosses below"}
 HELP = ("Mujhe koi rule samajh nahi aaya. Is tarah likho:\n"
         "“long entry when ema 9 crosses above ema 21 and rsi 14 below 70; exit when rsi above 80; sl 1% tp 2%”\n"
@@ -840,13 +964,19 @@ def clean_strategy(st, cur):
     if st.get("entry_mode") in ("next_open", "break"): out["entry_mode"] = st["entry_mode"]
     if "rr" in st: out["rr"] = max(0.1, min(float(st["rr"]), 20.0))
     if "stop_after_tp" in st: out["stop_after_tp"] = bool(st["stop_after_tp"])
+    for k in ("hedge", "no_weekend"):
+        if k in st: out[k] = bool(st[k])
+    if "max_sl_day" in st: out["max_sl_day"] = max(0, min(int(st["max_sl_day"]), 1000))
     if "max_trades_day" in st: out["max_trades_day"] = max(0, min(int(st["max_trades_day"]), 100))
     for k, hi in (("sl_pct", 100), ("tp_pct", 1000), ("fee_pct", 5), ("size_pct", 100), ("leverage", 100), ("capital", 1e9)):
         if k in st:
             out[k] = max(0.0, min(float(st[k]), hi))
     return out
 
+VLAB0 = {"vwap_h": "VWAP (of highs)", "vwap_l": "VWAP (of lows)"}
 VLAB = {f"vwap_{d}{n}": f"VWAP {'upper' if d == 'up' else 'lower'} band {n}" for d in ("up", "lo") for n in (1, 2, 3)}
+
+VLAB.update(VLAB0)
 
 def _dsc(o):
     if o["k"] in VLAB:
@@ -896,7 +1026,7 @@ def basic_parse(msg, cur):
     if re.search(r"\b(new strategy|reset|start over|from scratch|clear all)\b", t):
         for g in GROUPS:
             st[g] = {"logic": "AND", "rules": []}
-        for k in ("sl_mode", "entry_mode", "rr", "stop_after_tp", "max_trades_day"):
+        for k in ("sl_mode", "entry_mode", "rr", "stop_after_tp", "max_trades_day", "hedge", "no_weekend", "max_sl_day"):
             st.pop(k, None)
         changed = True
     ctx = {"or": (30, 0.0), "vp": 1}
@@ -926,7 +1056,7 @@ def basic_parse(msg, cur):
     for m in re.finditer(r"[.;\n](?!\d)", t):
         ev.append((m.start(), "b", None))
     ev.sort(key=lambda e: e[0])
-    new, side, ex, last = {g: [] for g in GROUPS}, "long", False, None
+    new, side, mode_, last = {g: [] for g in GROUPS}, "long", "entry", None
     for pos, kd, v in ev:
         if kd == "m":
             sd = "short" if v in ("short", "sell") or v.endswith("short") else "long" if v in ("long", "buy") or v.endswith("long") else None
@@ -936,28 +1066,30 @@ def basic_parse(msg, cur):
                 last = (f"{g0.split('_')[0]}_{sd}", r0)
                 new[last[0]].append(r0)
             elif v.startswith(("exit", "square", "close")):
-                ex, side = True, sd or side
+                mode_, side = "exit", sd or side
+            elif v.startswith("arm"):
+                mode_ = "arm"
             elif v in ("entry", "enter"):
-                ex = False
+                mode_ = "entry"
             else:
                 side = sd or side
-                ex = False if v in ("buy", "sell") else ex
+                mode_ = "entry" if v in ("buy", "sell") else mode_
         elif kd == "b":
-            ex = False
+            mode_ = "entry"
         elif kd == "e":
             if last:
                 r0 = {"l": dict(last[1]["l"]), "op": _op(v["op"]), "r": _opd(v["b"], v["bp"], ctx)}
                 new[last[0]].append(r0)
                 last = (last[0], r0)
         else:
-            g = f"{'exit' if ex else 'entry'}_{side}"
+            g = f"{mode_}_{side}"
             r0 = ({"l": _opd(v["a"], v["ap"], ctx), "op": _op(v["op"]), "r": _opd(v["b"], v["bp"], ctx)} if kd == "c"
                   else {"l": {"k": v}, "op": ">", "r": {"k": "num", "v": 0.5}})
             new[g].append(r0)
             last = (g, r0)
     use_or = bool(re.search(r"\bor\b", t)) and not re.search(r"\band\b", t)
     add = bool(re.search(r"\b(add|also|plus|additionally)\b", t))
-    label = {"entry_long": "Long entry", "exit_long": "Long exit", "entry_short": "Short entry", "exit_short": "Short exit"}
+    label = {"arm_long": "Long arm (setup)", "arm_short": "Short arm (setup)", "entry_long": "Long entry", "exit_long": "Long exit", "entry_short": "Short entry", "exit_short": "Short exit"}
     for g in GROUPS:
         if new[g]:
             st[g] = {"logic": "OR" if use_or else "AND", "rules": (st[g]["rules"] if add else []) + new[g]}
@@ -981,11 +1113,17 @@ def basic_parse(msg, cur):
         st["direction"] = d; notes.append(f"Direction: {d}"); changed = True
     spec = (("sl_mode", "candle", r"(?:sl|stop ?loss)\s+(?:at|below|above|on)\s+(?:the\s+)?(?:signal|setup|entry|trigger)\s+candle", "Stop-loss: signal candle low (long) / high (short)"),
             ("entry_mode", "break", r"(?:enter|entry)?\s*(?:on\s+)?break(?:out)?\s+of\s+(?:the\s+)?(?:signal|setup)\s+candle", "Entry: when the next candle breaks the signal candle high (long) / low (short)"),
+            ("hedge", True, r"\bhedge(?:\s+mode)?\b|allow\s+long\s+and\s+short\s+(?:together|at\s+the\s+same\s+time)", "Hedge: long and short can be open together"),
+            ("no_weekend", True, r"no\s+(?:new\s+)?(?:entries|trades|trading)\s+on\s+weekends?|no\s+weekend(?:\s+(?:trades|trading|entries))?|skip\s+weekends?", "No new entries on Saturday / Sunday"),
             ("stop_after_tp", True, r"stop\w*\s+(?:trading\s+)?(?:for\s+the\s+day\s+)?after\s+(?:the\s+)?(?:first\s+|1\s+|one\s+)?(?:tp|target)", "Stop trading for the day after a take-profit"))
     for key, val, pat, note in spec:
         if re.search(pat, t):
             st[key] = val; notes.append(note); changed = True
             t = re.sub(pat, " ", t)
+    ms_ = re.search(r"max(?:imum)?\s+(\d+)\s+(?:stop[- ]?loss(?:es)?|sls?)\s+(?:hits\s+)?(?:per|a|each)\s+day", t)
+    if ms_:
+        st["max_sl_day"] = int(ms_.group(1)); notes.append(f"Max stop-losses per day: {ms_.group(1)} (then no new entries)"); changed = True
+        t = t.replace(ms_.group(0), " ")
     mt = re.search(r"max(?:imum)?\s+(\d+)\s+trades?\s+(?:per|a|each)\s+day", t)
     if mt:
         st["max_trades_day"] = int(mt.group(1)); notes.append(f"Max trades per day: {mt.group(1)}"); changed = True
