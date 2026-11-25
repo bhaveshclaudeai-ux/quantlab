@@ -20,6 +20,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:5px 8px;b
 .it{border:1px solid var(--b);border-radius:8px;padding:8px;margin:6px 0}.sub{color:var(--m);font-size:12px}.sub2{color:#6b7a8d;font-size:11px;margin:3px 0 4px;word-break:break-word}#tt.on,#th.on{background:var(--a);border-color:var(--a)}
 .chip{padding:3px 9px;font-size:12px;border-radius:999px}#etb button.on,#ctb button.on{background:var(--a);border-color:var(--a)}
 .twocol{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:10px}
+.pbar{display:inline-block;height:8px;border-radius:4px}
 </style></head><body>
 <aside><h1>⚡ QuantLab</h1>
 <select id=pre onchange="usePreset(this.value)"></select>
@@ -50,7 +51,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:5px 8px;b
 <div class=row><input id=mcn type=number value=1000 title="Simulations"><select id=mcm><option value=bootstrap>Resample trades</option><option value=shuffle>Shuffle order</option></select><button onclick="mc()">Run Monte Carlo</button></div>
 <div class=row style="margin-top:14px"><button class=pri onclick="run()">Run backtest</button><button onclick="opt()">Optimize</button></div><div id=msg></div></aside>
 <main><div class=cards id=cards></div><div class=row id=ctb></div><div class=row id=leg></div><div id=gxi class=sub style="margin:2px 0 6px"></div><div class=ch id=pc></div><div id=osc></div><div class=row id=etb></div><div class=ch id=ec style="height:260px"></div>
-<div id=stk></div><div id=mcres></div><div id=ores></div><h2>Trades</h2><div class=box id=T></div></main>
+<div id=stk></div><div id=perf></div><div id=mcres></div><div id=ores></div><h2>Trades</h2><div class=box id=T></div></main>
 <script>
 const $=id=>document.getElementById(id);
 const KINDS={close:0,open:0,high:0,low:0,volume:0,ema:1,sma:1,supertrend:1,vwap:0,vwap_h:0,vwap_l:0,adx:1,plus_di:1,minus_di:1,hh:1,ll:1,rsi:1,macd:0,macd_sig:0,stoch:1,cci:1,roc:1,atr:1,bb_up:1,bb_lo:1,body_pct:0,range_pct:0,vol_sma:1,vwap_up1:0,vwap_lo1:0,vwap_up2:0,vwap_lo2:0,vwap_up3:0,vwap_lo3:0,or_high:3,or_low:3,vp_poc:1,vp_vah:1,vp_val:1,day_open:0,day_high:0,day_low:0,pw_high:0,pw_low:0,prev_high:0,prev_low:0,prev_close:0,pd_high:0,pd_low:0,pd_close:0,bull_candle:0,bear_candle:0,bull_engulf:0,bear_engulf:0,hammer:0,shooting_star:0,doji:0,inside_bar:0,hour:0,dow:0,num:2};
@@ -133,7 +134,7 @@ const mk=(el,x={})=>LightweightCharts.createChart(el,{autoSize:true,layout:{back
 let pc,ec,cs,eqs;
 function show(d){histAdd(d.metrics);const m=d.metrics,f=(v,s='')=>`<span class="${v>=0?'pos':'neg'}">${v}${s}</span>`;
  $('cards').innerHTML=[['Net return',f(m.ret,'%')],['Buy & hold',f(m.bh,'%')],['Max drawdown',f(m.dd,'%')],['Win rate',m.win+'%'],['Profit factor',m.pf],['Sharpe',m.sharpe],['Trades',m.trades,`${m.nw} wins / ${m.trades-m.nw} losses`],['Avg R:R',m.rr,`avg win ${m.aw}% · avg loss ${m.al}%`],['Max win streak',m.mws??'–',`${m.mws??0} wins in a row · P&L +${m.mws_pnl??0}`],['Max loss streak',m.mls??'–',`${m.mls??0} losses in a row · P&L ${m.mls_pnl??0}`],['Avg trade',f(m.avg,'%')],['Net P&L',f(+(m.final-(+S.capital||10000)).toFixed(2),'')],['Final equity',m.final]].map(([a,b,c])=>`<div class=card><small>${a}</small><b>${b}</b>${c?`<small>${c}</small>`:''}</div>`).join('');
- cs.setData(d.candles);LASTD=d;drawEq();drawStk(d.streaks);LASTC=d.candles;drawOv(d.overlays||[]);ctbRender();
+ cs.setData(d.candles);LASTD=d;drawEq();drawStk(d.streaks);drawPerf();LASTC=d.candles;drawOv(d.overlays||[]);ctbRender();
  const mk2=[];d.trades.forEach(t=>{const L=t.side==='long';mk2.push({time:t.t0,position:L?'belowBar':'aboveBar',color:'#3b82f6',shape:L?'arrowUp':'arrowDown'},{time:t.t1,position:L?'aboveBar':'belowBar',color:t.pnl>0?'#22c55e':'#ef4444',shape:'circle'})});
  cs.setMarkers(mk2.sort((a,b)=>a.time-b.time));const fit=()=>{pc.timeScale().fitContent();ec.timeScale().fitContent()};fit();setTimeout(fit,80);
  $('T').innerHTML=`<table><tr><th>#</th><th>Side</th><th>Entry time</th><th>Entry</th><th>Exit</th><th>PnL</th><th>%</th><th>Exit by</th></tr>`+d.trades.map((t,i)=>[i+1,t,t]).reverse().map(([i,t])=>`<tr><td>${i}</td><td>${t.side}</td><td>${new Date(t.t0*1000).toLocaleString()}</td><td>${t.entry.toFixed(4)}</td><td>${t.exit.toFixed(4)}</td><td class="${t.pnl>=0?'pos':'neg'}">${t.pnl.toFixed(2)}</td><td>${t.pct.toFixed(2)}</td><td>${t.why}</td></tr>`).join('')+`</table>`}
@@ -221,6 +222,27 @@ function drawStk(s){if(!s){$('stk').innerHTML='';return}
  const fd=t=>new Date(t*1000).toLocaleDateString([],{day:'numeric',month:'short',year:'2-digit'});
  const tbl=(title,cls,L,col,key)=>`<div class=box style="max-height:none"><h2 style="margin:8px 10px">${title}</h2><table><tr><th>#</th><th>Trades</th><th>From</th><th>To</th><th>P&amp;L</th><th>${col}</th></tr>${L.map((r,i)=>`<tr><td>${i+1}</td><td><b>${r.n}</b></td><td>${fd(r.t0)}</td><td>${fd(r.t1)}</td><td class="${cls}">${r.pnl>=0?'+':''}${r.pnl}</td><td>${r[key]}</td></tr>`).join('')||'<tr><td colspan=6>–</td></tr>'}</table></div>`;
  $('stk').innerHTML=`<div class=twocol>${tbl('Top 10 losing streaks','neg',s.losses,'SL hits','sl')}${tbl('Top 10 winning streaks','pos',s.wins,'TP hits','tp')}</div>`}
+let PTZ=rd('quantlab_ptz','"UTC"'),PMT='pnl';const PMIN=3;
+function perfBuckets(trades){const f=new Intl.DateTimeFormat('en-GB',{timeZone:PTZ,hourCycle:'h23',hour:'2-digit',weekday:'short',year:'numeric',month:'2-digit'});
+ const H=Array.from({length:24},()=>[]),D={Mon:[],Tue:[],Wed:[],Thu:[],Fri:[],Sat:[],Sun:[]},M={},C={};
+ trades.forEach(t=>{const p=Object.fromEntries(f.formatToParts(new Date(t.t0*1000)).map(x=>[x.type,x.value])),k=p.year+'-'+p.month;H[(+p.hour)%24].push(t);if(D[p.weekday])D[p.weekday].push(t);(M[k]=M[k]||[]).push(t);(C[p.month]=C[p.month]||[]).push(t)});
+ return{H,D,M,C}}
+const pst=a=>{const n=a.length,w=a.filter(x=>x.pnl>0).length,net=a.reduce((s,x)=>s+x.pnl,0);return{n,win:n?w/n*100:0,net,avg:n?net/n:0}};
+const pval=s=>PMT==='win'?s.win:PMT==='avg'?s.avg:s.net;
+const fm=v=>(v>=0?'+':'')+(Math.abs(v)>=100?Math.round(v):v.toFixed(2));
+function perfRows(title,items){const rows=items.map(([lab,a])=>({lab,s:pst(a)})),ok=rows.filter(r=>r.s.n>=PMIN),best=ok.length?ok.reduce((a,b)=>pval(b.s)>pval(a.s)?b:a):null,worst=ok.length>1?ok.reduce((a,b)=>pval(b.s)<pval(a.s)?b:a):null,mx=Math.max(1e-9,...rows.map(r=>Math.abs(pval(r.s))));
+ const html=`<div class=box style="max-height:340px"><h2 style="margin:8px 10px">${title}</h2><table><tr><th style="text-align:left">${title.split(' ')[1]||''}</th><th>Trades</th><th>Win%</th><th>Net P&amp;L</th><th>Avg/trade</th><th style="width:30%"></th></tr>`+rows.map(r=>{const v=pval(r.s),good=PMT==='win'?v>=50:v>=0,tag=best&&r===best?' ★':worst&&r===worst?' ▼':'';
+  return `<tr style="${r.s.n?'':'opacity:.35'}"><td style="text-align:left"><b>${r.lab}</b>${tag}</td><td>${r.s.n}</td><td>${r.s.n?r.s.win.toFixed(0)+'%':'–'}</td><td class="${r.s.net>=0?'pos':'neg'}">${r.s.n?fm(r.s.net):'–'}</td><td>${r.s.n?fm(r.s.avg):'–'}</td><td style="text-align:left"><span class=pbar style="width:${r.s.n?Math.max(2,Math.abs(v)/mx*100):0}%;background:${good?'var(--g)':'var(--r)'}"></span></td></tr>`}).join('')+'</table></div>';
+ return{html,best,worst}}
+function drawPerf(){const d=LASTD;if(!d||!d.trades||!d.trades.length){$('perf').innerHTML=d?'<p class=sub>No trades — nothing to break down.</p>':'';return}
+ const B=perfBuckets(d.trades),DN=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'],MN=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],mk=Object.keys(B.M).sort();
+ const hr=perfRows('By hour',B.H.map((a,h)=>[String(h).padStart(2,'0')+':00',a])),dy=perfRows('By weekday',DN.map(x=>[x,B.D[x]])),mo=perfRows('By month',mk.map(k=>[k,B.M[k]])),cm=mk.length>12?perfRows('By calendar-month',MN.map((x,i)=>[x,B.C[String(i+1).padStart(2,'0')]||[]])):null;
+ const b=(x,t)=>x.best?`${t}: <b>${x.best.lab}</b> (${PMT==='win'?x.best.s.win.toFixed(0)+'% win':PMT==='avg'?fm(x.best.s.avg)+'/trade':fm(x.best.s.net)}, ${x.best.s.n} trades)`:`${t}: –`;
+ const w=(x,t)=>x.worst?`${t}: <b>${x.worst.lab}</b> (${PMT==='win'?x.worst.s.win.toFixed(0)+'% win':PMT==='avg'?fm(x.worst.s.avg)+'/trade':fm(x.worst.s.net)})`:'';
+ const tz=[['UTC','UTC'],['Asia/Kolkata','IST'],['America/New_York','New York'],['Europe/London','London']].map(([v,l])=>`<option value="${v}" ${v===PTZ?'selected':''}>${l}</option>`).join('');
+ $('perf').innerHTML=`<h2>Best hours, days &amp; months</h2><div class=row><select onchange="PTZ=this.value;wr('quantlab_ptz',PTZ);drawPerf()">${tz}</select><select onchange="PMT=this.value;drawPerf()"><option value=pnl ${PMT==='pnl'?'selected':''}>Best by: Net P&amp;L</option><option value=win ${PMT==='win'?'selected':''}>Best by: Win rate</option><option value=avg ${PMT==='avg'?'selected':''}>Best by: Avg per trade</option></select></div>
+ <p style="margin:4px 0;line-height:1.7">★ ${b(hr,'Best hour')} · ${b(dy,'Best day')} · ${b(mo,'Best month')}<br><span style="color:var(--m)">▼ ${w(hr,'Worst hour')} · ${w(dy,'Worst day')} · ${w(mo,'Worst month')}</span></p>
+ <div class=twocol>${hr.html}${dy.html}${mo.html}${cm?cm.html:''}</div><p class=sub>Grouped by trade <b>entry</b> time in the chosen time zone. ★ / ▼ only count buckets with at least ${PMIN} trades — small samples can mislead.</p>`}
 $('pre').innerHTML=Object.keys(PRE).map(k=>`<option>${k}</option>`).join('');
 $('tf').innerHTML=['1m','3m','5m','15m','30m','1h','2h','4h','1d'].map(k=>`<option ${k==='1h'?'selected':''}>${k}</option>`).join('');
 usePreset(Object.keys(PRE)[0]);libRender();ctbRender();csvList();say('a','Hi! Apni strategy words mein likho, jaise: “long when ema 9 crosses above ema 21 and rsi below 70, exit when rsi above 80, sl 1% tp 2%”. Candle patterns (hammer, bullish engulfing), previous day high/low, opening range (“15 min opening range from 13:30 utc”), volume profile (poc, vah, val), supertrend, adx, stoch, time window (between 8 and 20 utc) sab chalte hain. “new strategy” se reset.');
