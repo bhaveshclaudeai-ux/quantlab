@@ -19,6 +19,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:5px 8px;b
 #cl{max-height:200px;overflow:auto;font-size:13px;background:#0d141d;border:1px solid var(--b);border-radius:8px;padding:6px 10px}#cl p{margin:6px 0}#cl .u{color:#93c5fd}
 .it{border:1px solid var(--b);border-radius:8px;padding:8px;margin:6px 0}.sub{color:var(--m);font-size:12px}.sub2{color:#6b7a8d;font-size:11px;margin:3px 0 4px;word-break:break-word}#tt.on,#th.on{background:var(--a);border-color:var(--a)}
 .chip{padding:3px 9px;font-size:12px;border-radius:999px}#etb button.on,#ctb button.on{background:var(--a);border-color:var(--a)}
+.twocol{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:10px}
 </style></head><body>
 <aside><h1>⚡ QuantLab</h1>
 <select id=pre onchange="usePreset(this.value)"></select>
@@ -49,7 +50,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:5px 8px;b
 <div class=row><input id=mcn type=number value=1000 title="Simulations"><select id=mcm><option value=bootstrap>Resample trades</option><option value=shuffle>Shuffle order</option></select><button onclick="mc()">Run Monte Carlo</button></div>
 <div class=row style="margin-top:14px"><button class=pri onclick="run()">Run backtest</button><button onclick="opt()">Optimize</button></div><div id=msg></div></aside>
 <main><div class=cards id=cards></div><div class=row id=ctb></div><div class=row id=leg></div><div id=gxi class=sub style="margin:2px 0 6px"></div><div class=ch id=pc></div><div id=osc></div><div class=row id=etb></div><div class=ch id=ec style="height:260px"></div>
-<div id=mcres></div><div id=ores></div><h2>Trades</h2><div class=box id=T></div></main>
+<div id=stk></div><div id=mcres></div><div id=ores></div><h2>Trades</h2><div class=box id=T></div></main>
 <script>
 const $=id=>document.getElementById(id);
 const KINDS={close:0,open:0,high:0,low:0,volume:0,ema:1,sma:1,supertrend:1,vwap:0,vwap_h:0,vwap_l:0,adx:1,plus_di:1,minus_di:1,hh:1,ll:1,rsi:1,macd:0,macd_sig:0,stoch:1,cci:1,roc:1,atr:1,bb_up:1,bb_lo:1,body_pct:0,range_pct:0,vol_sma:1,vwap_up1:0,vwap_lo1:0,vwap_up2:0,vwap_lo2:0,vwap_up3:0,vwap_lo3:0,or_high:3,or_low:3,vp_poc:1,vp_vah:1,vp_val:1,day_open:0,day_high:0,day_low:0,pw_high:0,pw_low:0,prev_high:0,prev_low:0,prev_close:0,pd_high:0,pd_low:0,pd_close:0,bull_candle:0,bear_candle:0,bull_engulf:0,bear_engulf:0,hammer:0,shooting_star:0,doji:0,inside_bar:0,hour:0,dow:0,num:2};
@@ -132,7 +133,7 @@ const mk=(el,x={})=>LightweightCharts.createChart(el,{autoSize:true,layout:{back
 let pc,ec,cs,eqs;
 function show(d){histAdd(d.metrics);const m=d.metrics,f=(v,s='')=>`<span class="${v>=0?'pos':'neg'}">${v}${s}</span>`;
  $('cards').innerHTML=[['Net return',f(m.ret,'%')],['Buy & hold',f(m.bh,'%')],['Max drawdown',f(m.dd,'%')],['Win rate',m.win+'%'],['Profit factor',m.pf],['Sharpe',m.sharpe],['Trades',m.trades,`${m.nw} wins / ${m.trades-m.nw} losses`],['Avg R:R',m.rr,`avg win ${m.aw}% · avg loss ${m.al}%`],['Max win streak',m.mws??'–',`${m.mws??0} wins in a row · P&L +${m.mws_pnl??0}`],['Max loss streak',m.mls??'–',`${m.mls??0} losses in a row · P&L ${m.mls_pnl??0}`],['Avg trade',f(m.avg,'%')],['Net P&L',f(+(m.final-(+S.capital||10000)).toFixed(2),'')],['Final equity',m.final]].map(([a,b,c])=>`<div class=card><small>${a}</small><b>${b}</b>${c?`<small>${c}</small>`:''}</div>`).join('');
- cs.setData(d.candles);LASTD=d;drawEq();LASTC=d.candles;drawOv(d.overlays||[]);ctbRender();
+ cs.setData(d.candles);LASTD=d;drawEq();drawStk(d.streaks);LASTC=d.candles;drawOv(d.overlays||[]);ctbRender();
  const mk2=[];d.trades.forEach(t=>{const L=t.side==='long';mk2.push({time:t.t0,position:L?'belowBar':'aboveBar',color:'#3b82f6',shape:L?'arrowUp':'arrowDown'},{time:t.t1,position:L?'aboveBar':'belowBar',color:t.pnl>0?'#22c55e':'#ef4444',shape:'circle'})});
  cs.setMarkers(mk2.sort((a,b)=>a.time-b.time));const fit=()=>{pc.timeScale().fitContent();ec.timeScale().fitContent()};fit();setTimeout(fit,80);
  $('T').innerHTML=`<table><tr><th>#</th><th>Side</th><th>Entry time</th><th>Entry</th><th>Exit</th><th>PnL</th><th>%</th><th>Exit by</th></tr>`+d.trades.map((t,i)=>[i+1,t,t]).reverse().map(([i,t])=>`<tr><td>${i}</td><td>${t.side}</td><td>${new Date(t.t0*1000).toLocaleString()}</td><td>${t.entry.toFixed(4)}</td><td>${t.exit.toFixed(4)}</td><td class="${t.pnl>=0?'pos':'neg'}">${t.pnl.toFixed(2)}</td><td>${t.pct.toFixed(2)}</td><td>${t.why}</td></tr>`).join('')+`</table>`}
@@ -216,6 +217,10 @@ async function csvUp(i){const f=i.files[0];i.value='';if(!f)return;busy('Reading
   $('sym').value=r.key;busy(`Imported ${r.rows} candles (${r.base}m) · ${r.first} → ${r.last} UTC. Pick a timeframe ≥ ${r.base}m and press Run backtest.`);csvList();ctbRender()}catch(x){busy('⚠ '+x.message)}}
 async function csvList(){try{const k=await idb('readonly',s=>s.getAllKeys());$('csvl').innerHTML=(k||[]).map(n=>`<button class=chip onclick="$('sym').value='CSV:${n}'">${n}</button><span onclick="csvDel('${n}')" style="cursor:pointer;color:var(--m);margin-right:6px">×</span>`).join('')}catch(e){}}
 async function csvDel(n){try{await idb('readwrite',s=>s.delete(n))}catch(e){}csvList()}
+function drawStk(s){if(!s){$('stk').innerHTML='';return}
+ const fd=t=>new Date(t*1000).toLocaleDateString([],{day:'numeric',month:'short',year:'2-digit'});
+ const tbl=(title,cls,L,col,key)=>`<div class=box style="max-height:none"><h2 style="margin:8px 10px">${title}</h2><table><tr><th>#</th><th>Trades</th><th>From</th><th>To</th><th>P&amp;L</th><th>${col}</th></tr>${L.map((r,i)=>`<tr><td>${i+1}</td><td><b>${r.n}</b></td><td>${fd(r.t0)}</td><td>${fd(r.t1)}</td><td class="${cls}">${r.pnl>=0?'+':''}${r.pnl}</td><td>${r[key]}</td></tr>`).join('')||'<tr><td colspan=6>–</td></tr>'}</table></div>`;
+ $('stk').innerHTML=`<div class=twocol>${tbl('Top 10 losing streaks','neg',s.losses,'SL hits','sl')}${tbl('Top 10 winning streaks','pos',s.wins,'TP hits','tp')}</div>`}
 $('pre').innerHTML=Object.keys(PRE).map(k=>`<option>${k}</option>`).join('');
 $('tf').innerHTML=['1m','3m','5m','15m','30m','1h','2h','4h','1d'].map(k=>`<option ${k==='1h'?'selected':''}>${k}</option>`).join('');
 usePreset(Object.keys(PRE)[0]);libRender();ctbRender();csvList();say('a','Hi! Apni strategy words mein likho, jaise: “long when ema 9 crosses above ema 21 and rsi below 70, exit when rsi above 80, sl 1% tp 2%”. Candle patterns (hammer, bullish engulfing), previous day high/low, opening range (“15 min opening range from 13:30 utc”), volume profile (poc, vah, val), supertrend, adx, stoch, time window (between 8 and 20 utc) sab chalte hain. “new strategy” se reset.');

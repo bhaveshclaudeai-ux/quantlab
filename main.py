@@ -699,6 +699,23 @@ def _streak(trades, win):
             cur, tot = 0, 0.0
     return best
 
+def streak_runs(trades, top=10):
+    """The longest runs of consecutive winning / losing trades (in closing order) with dates and P&L."""
+    runs, cur = {True: [], False: []}, None
+    for x in trades:
+        w = x["pnl"] > 0
+        if cur and cur["w"] == w:
+            cur["n"] += 1; cur["pnl"] += x["pnl"]; cur["t1"] = x["t1"]; cur["sl"] += x["why"] == "sl"; cur["tp"] += x["why"] == "tp"
+        else:
+            if cur:
+                runs[cur["w"]].append(cur)
+            cur = dict(w=w, n=1, t0=x["t0"], t1=x["t1"], pnl=x["pnl"], sl=int(x["why"] == "sl"), tp=int(x["why"] == "tp"))
+    if cur:
+        runs[cur["w"]].append(cur)
+    fmt = lambda L: [dict(n=r["n"], t0=r["t0"], t1=r["t1"], pnl=round(r["pnl"], 2), sl=r["sl"], tp=r["tp"])
+                     for r in sorted(L, key=lambda r: (-r["n"], -abs(r["pnl"])))[:top]]
+    return dict(wins=fmt(runs[True]), losses=fmt(runs[False]))
+
 def metrics(df, equity, trades, tf, cap0):
     (mws, mws_pnl), (mls, mls_pnl) = _streak(trades, True), _streak(trades, False)
     r = np.diff(equity) / np.where(equity[:-1] == 0, np.nan, equity[:-1])
@@ -778,7 +795,7 @@ def api_backtest(q: Req):
     return dict(
         candles=[dict(time=t[i], open=df.open[i], high=df.high[i], low=df.low[i], close=df.close[i]) for i in range(len(df))],
         equity=[dict(time=t[i], value=round(float(equity[i]), 2)) for i in range(len(df))],
-        trades=trades, metrics=metrics(df, equity, trades, q.interval, cap0), overlays=_ov(df, q))
+        trades=trades, metrics=metrics(df, equity, trades, q.interval, cap0), overlays=_ov(df, q), streaks=streak_runs(trades))
 
 def set_path(d, path, v):
     a = path.split(".")
