@@ -479,7 +479,7 @@ def overlays(df, items, limit=12):
 def _ov(df, q):
     try:
         ex = [e for e in (q.extra or []) if isinstance(e, dict) and e.get("k") in KIND_FLAG]
-        items = [r[sd] for g in GROUPS for r in ((q.strategy.get(g) or {}).get("rules") or []) for sd in ("l", "r")] + ex
+        items = [r[sd] for g in GROUPS for r in ((q.strategy.get(g) or {}).get("rules") or []) for sd in ("l", "r")] + ex + [q.strategy[k] for k in ("entry_level_long", "sl_level_long", "entry_level_short", "sl_level_short") if q.strategy.get(k)]
         return overlays(df, items)
     except Exception:
         return []
@@ -500,6 +500,8 @@ def backtest_pro(df, s):
     rr, sl_candle, entry_break = float(s.get("rr") or 1), s.get("sl_mode") == "candle", s.get("entry_mode") == "break"
     stop_tp, max_td, max_sl = bool(s.get("stop_after_tp")), int(s.get("max_trades_day") or 0), int(s.get("max_sl_day") or 0)
     hedge, no_wk = bool(s.get("hedge")), bool(s.get("no_weekend"))
+    lvl = {1: val(df, s["entry_level_long"], cache) if s.get("entry_level_long") else None, -1: val(df, s["entry_level_short"], cache) if s.get("entry_level_short") else None}
+    slv = {1: val(df, s["sl_level_long"], cache) if s.get("sl_level_long") else None, -1: val(df, s["sl_level_short"], cache) if s.get("sl_level_short") else None}
     arm, esig, xsig = {1: sig["arm_long"], -1: sig["arm_short"]}, {1: sig["entry_long"], -1: sig["entry_short"]}, {1: sig["exit_long"], -1: sig["exit_short"]}
     eq, equity, trades = cap0, np.full(n, cap0), []
     P, state, trig = {1: None, -1: None}, {1: 0, -1: 0}, {1: None, -1: None}
@@ -530,9 +532,9 @@ def backtest_pro(df, s):
     def can(sd):
         return P[sd] is None and (hedge or (P[1] is None and P[-1] is None))
 
-    def enter(sd, px, slp, i, day):
+    def enter(sd, px, slp, i, day, lvl_sl=False):
         nonlocal eq
-        if sl_candle:
+        if sl_candle or lvl_sl:
             risk = abs(px - slp)
             if risk <= 0:
                 return
@@ -564,6 +566,19 @@ def backtest_pro(df, s):
             and not (max_td and tcount.get(day, 0) >= max_td)
         for sd in (1, -1):
             if not use[sd]:
+                continue
+            if arm[sd] is not None and lvl[sd] is not None:     # armed -> wait for a RETEST of a level (any time that day)
+                if allowed:
+                    if state[sd] == 0:
+                        if arm[sd][i]:
+                            state[sd] = 1
+                    else:
+                        L = lvl[sd][i - 1]                       # level as known at the previous candle (no look-ahead)
+                        if L == L and ((l[i] <= L) if sd > 0 else (h[i] >= L)) and can(sd):
+                            S_ = slv[sd][i - 1] if slv[sd] is not None else float("nan")
+                            if S_ == S_:
+                                enter(sd, min(o[i], L) if sd > 0 else max(o[i], L), S_, i, day, True)
+                            state[sd] = 0
                 continue
             if arm[sd] is not None:                             # armed setup machine
                 st = state[sd]
@@ -602,7 +617,7 @@ def backtest_pro(df, s):
     return equity, trades, cap0
 
 
-PRO_KEYS = ("hedge", "no_weekend", "max_sl_day")
+PRO_KEYS = ("hedge", "no_weekend", "max_sl_day", "entry_level_long", "entry_level_short")
 
 def backtest(df, s):
     if (s.get("arm_long") or {}).get("rules") or (s.get("arm_short") or {}).get("rules") or any(s.get(k) for k in PRO_KEYS):
@@ -932,6 +947,9 @@ _OPR = (r"(?:(?:cross(?:es|ed|ing)?|break(?:s|ing)?)\s+(?:above|over|up(?:\s+thr
         r"|(?:is\s+|goes\s+|closes\s+|close\s+|stays\s+)?(?:below|less than|lower than|under|<))")
 _CL = re.compile(r"(?P<a>%s)(?:\s*\(?\s*(?P<ap>\d+)\s*\)?)?\s+(?P<op>%s)\s+(?P<b>%s)(?:\s*\(?\s*(?P<bp>\d+)\s*\)?)?" % (_OPD, _OPR, _OPD))
 _EL = re.compile(r"(?:\band\b|\bor\b|,)\s*(?P<op>%s)\s+(?P<b>%s)(?:\s*\(?\s*(?P<bp>\d+)\s*\)?)?" % (_OPR, _OPD))
+_ALT0 = "|".join(re.escape(a) for a, k in sorted(ALIAS, key=lambda x: -len(x[0])) if KIND_FLAG[k] == 0 and k not in ("close", "open", "high", "low", "volume", "hour"))
+_RT = re.compile(r"retest(?:s|ed)?(?:\s+of)?(?:\s+the)?\s+(?P<lv>%s)" % _ALT0)
+_SLV = re.compile(r"(?:sl|stop ?loss)\s+(?:at|on|below|above)\s+(?:the\s+)?(?P<lv>%s)" % _ALT0)
 _MARK = re.compile(r"\b(exit|square off|close (?:the )?(?:long|short|position|trade)|entry|enter|buy|sell|short|long|arm(?:ed|s|ing)?)\b")
 OPTXT = {">": "is above", "<": "is below", "x_up": "crosses above", "x_dn": "crosses below"}
 HELP = ("Mujhe koi rule samajh nahi aaya. Is tarah likho:\n"
@@ -983,6 +1001,8 @@ def clean_strategy(st, cur):
     if "stop_after_tp" in st: out["stop_after_tp"] = bool(st["stop_after_tp"])
     for k in ("hedge", "no_weekend"):
         if k in st: out[k] = bool(st[k])
+    for k in ("entry_level_long", "sl_level_long", "entry_level_short", "sl_level_short"):
+        if st.get(k): out[k] = _co(st[k])
     if "max_sl_day" in st: out["max_sl_day"] = max(0, min(int(st["max_sl_day"]), 1000))
     if "max_trades_day" in st: out["max_trades_day"] = max(0, min(int(st["max_trades_day"]), 100))
     for k, hi in (("sl_pct", 100), ("tp_pct", 1000), ("fee_pct", 5), ("size_pct", 100), ("leverage", 100), ("capital", 1e9)):
@@ -1043,7 +1063,7 @@ def basic_parse(msg, cur):
     if re.search(r"\b(new strategy|reset|start over|from scratch|clear all)\b", t):
         for g in GROUPS:
             st[g] = {"logic": "AND", "rules": []}
-        for k in ("sl_mode", "entry_mode", "rr", "stop_after_tp", "max_trades_day", "hedge", "no_weekend", "max_sl_day"):
+        for k in ("sl_mode", "entry_mode", "rr", "stop_after_tp", "max_trades_day", "hedge", "no_weekend", "max_sl_day", "entry_level_long", "entry_level_short", "sl_level_long", "sl_level_short"):
             st.pop(k, None)
         changed = True
     ctx = {"or": (30, 0.0), "vp": 1}
@@ -1064,6 +1084,11 @@ def basic_parse(msg, cur):
     for ph, key in PHR.items():
         for m in re.finditer(re.escape(ph), t):
             ev.append((m.start(), "p", key)); spans.append((m.start(), m.end()))
+    lv = {}
+    for m in _RT.finditer(t):
+        ev.append((m.start(), "r", ALIASD[m.group("lv")])); spans.append((m.start(), m.end()))
+    for m in _SLV.finditer(t):
+        ev.append((m.start(), "s", ALIASD[m.group("lv")])); spans.append((m.start(), m.end()))
     for m in _EL.finditer(t):  # "... and below X": reuse the previous left operand
         if not any(a <= m.start() < b or m.start() <= a < m.end() for a, b in spans):
             ev.append((m.start(), "e", m)); spans.append((m.start(), m.end()))
@@ -1093,6 +1118,8 @@ def basic_parse(msg, cur):
                 mode_ = "entry" if v in ("buy", "sell") else mode_
         elif kd == "b":
             mode_ = "entry"
+        elif kd in ("r", "s"):
+            lv[("entry" if kd == "r" else "sl") + "_level_" + side] = {"k": v}
         elif kd == "e":
             if last:
                 r0 = {"l": dict(last[1]["l"]), "op": _op(v["op"]), "r": _opd(v["b"], v["bp"], ctx)}
@@ -1106,6 +1133,11 @@ def basic_parse(msg, cur):
             last = (g, r0)
     use_or = bool(re.search(r"\bor\b", t)) and not re.search(r"\band\b", t)
     add = bool(re.search(r"\b(add|also|plus|additionally)\b", t))
+    for key, op in lv.items():
+        st[key] = op; changed = True
+    for sd_ in ("long", "short"):
+        if f"entry_level_{sd_}" in lv or f"sl_level_{sd_}" in lv:
+            notes.append(f"{sd_.title()}: enter on retest of {_dsc(st.get(f'entry_level_{sd_}') or {'k': 'close'})}, stop-loss at {_dsc(st.get(f'sl_level_{sd_}') or {'k': 'close'})}")
     label = {"arm_long": "Long arm (setup)", "arm_short": "Short arm (setup)", "entry_long": "Long entry", "exit_long": "Long exit", "entry_short": "Short entry", "exit_short": "Short exit"}
     for g in GROUPS:
         if new[g]:
@@ -1123,8 +1155,8 @@ def basic_parse(msg, cur):
     if re.search(r"(long only|only long|buy only|only buy)", t): d = "long"
     elif re.search(r"(short only|only short|sell only|only sell)", t): d = "short"
     elif re.search(r"\b(both|long and short|long/short|long \+ short|both sides)\b", t): d = "both"
-    elif new["entry_long"] or new["entry_short"]:
-        hl, hs = bool(st["entry_long"]["rules"]), bool(st["entry_short"]["rules"])
+    elif new["entry_long"] or new["entry_short"] or new["arm_long"] or new["arm_short"]:
+        hl, hs = bool(st["entry_long"]["rules"] or st["arm_long"]["rules"]), bool(st["entry_short"]["rules"] or st["arm_short"]["rules"])
         d = "both" if hl and hs else "short" if hs else "long"
     if d and d != st["direction"]:
         st["direction"] = d; notes.append(f"Direction: {d}"); changed = True
@@ -1151,7 +1183,7 @@ def basic_parse(msg, cur):
         if re.search(off, t): st[key] = 0; notes.append(f"{nm}: off"); changed = True
         elif num(pat) is not None: st[key] = num(pat); notes.append(f"{nm}: {st[key]:g}%"); changed = True
     rr = re.search(r"\b(?:rr|risk[ -]?reward)\D{0,6}(\d+(?:\.\d+)?)(?:\s*[:/]\s*(\d+(?:\.\d+)?))?", t)
-    if rr and st.get("sl_mode") == "candle":
+    if rr and (st.get("sl_mode") == "candle" or any(k in st for k in ("sl_level_long", "sl_level_short"))):
         st["rr"] = float(rr.group(2)) / float(rr.group(1)) if rr.group(2) else float(rr.group(1))
         notes.append(f"Risk-reward: 1:{st['rr']:g}"); changed = True
     elif rr and st["sl_pct"]:
@@ -1192,7 +1224,7 @@ def _ai_sys():
             '{"reply": short friendly explanation in the user\'s language (Hinglish is fine), "symbol": Binance pair like BTCUSDT or null, '
             '"interval": one of 1m,3m,5m,15m,30m,1h,2h,4h,1d or null, "strategy": the FULL updated strategy}. '
             'Strategy keys: direction (long|short|both); entry_long, exit_long, entry_short, exit_short, each {"logic":"AND"|"OR","rules":[{"l":operand,"op":op,"r":operand}]}; '
-            'sl_pct and tp_pct (percent, 0=off); fee_pct; size_pct; leverage; capital; optional sl_mode (pct or candle: stop at the signal candle low for longs and high for shorts), rr (take-profit = rr x risk when sl_mode is candle), entry_mode (next_open or break: enter when the candle after the signal candle breaks its high for longs and low for shorts), stop_after_tp (true: no more trades that UTC day after a take-profit), max_trades_day (0=off). Operand: {"k":kind,"p":period} (p only for kinds marked (p)) or {"k":"num","v":number}. '
+            'sl_pct and tp_pct (percent, 0=off); fee_pct; size_pct; leverage; capital; optional sl_mode (pct or candle: stop at the signal candle low for longs and high for shorts), rr (take-profit = rr x risk when sl_mode is candle), entry_mode (next_open or break: enter when the candle after the signal candle breaks its high for longs and low for shorts), stop_after_tp (true: no more trades that UTC day after a take-profit), max_trades_day (0=off), hedge, no_weekend, max_sl_day, and entry_level_long / sl_level_long / entry_level_short / sl_level_short (operands: after the arm rules were true that day, enter when price retests the entry level; stop at the sl level; take-profit = rr x risk). Operand: {"k":kind,"p":period} (p only for kinds marked (p)) or {"k":"num","v":number}. '
             'op is one of ">", "<", "x_up" (crosses above), "x_dn" (crosses below). Available kinds - ' + cat + ". "
             'Candle patterns (bull_candle, bear_candle, bull_engulf, bear_engulf, hammer, shooting_star, doji, inside_bar) are 1/0 series: use {"l":{"k":"hammer"},"op":">","r":{"k":"num","v":0.5}}. '
             "hour is the UTC hour 0-23 (hours 8 to 19 means hour > 7.5 AND hour < 19.5); dow 0=Monday. pd_* are previous UTC day values, prev_* the previous candle; "
