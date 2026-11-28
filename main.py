@@ -2,10 +2,13 @@ import copy, itertools, json, math, os, re, time
 from datetime import datetime, timezone
 import numpy as np, pandas as pd, requests
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 app = FastAPI(title="QuantLab")
+app.add_middleware(GZipMiddleware, minimum_size=1000)   # big backtests send several MB of JSON - compress it
+CAP = 50000                                              # max candles per backtest (Binance / Yahoo)
 HERE = os.path.dirname(os.path.abspath(__file__))
 BASES = ["https://data-api.binance.vision", "https://api.binance.com", "https://api1.binance.com", "https://api.binance.us"]
 TF = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "2h": 120, "4h": 240, "1d": 1440}
@@ -59,7 +62,7 @@ def load(sym, tf, n):
     CACHE[(sym, tf)] = (time.time(), df)
     return df.tail(n).reset_index(drop=True)
 
-def load_range(sym, tf, a, b, cap=20000):
+def load_range(sym, tf, a, b, cap=CAP):
     """Candles between two dates (UTC, ms). Only the start -> end window, max 20,000 candles."""
     tfms = TF[tf] * 60000
     if a is None:
@@ -158,7 +161,7 @@ def _dk(df):
 # ---------------- CSV import (any market, any history) ----------------
 CSVS = {}
 CSV_CAP = 60000
-CSV_TZ = ("UTC", "Asia/Kolkata", "America/New_York", "Europe/London", "Europe/Zurich")
+CSV_TZ = ("UTC", "Asia/Kolkata", "America/New_York", "Europe/London", "Europe/Zurich", "Europe/Athens")  # Athens = typical MT4/MT5 broker time (GMT+2 / +3)
 BASES_MIN = [1, 3, 5, 15, 30, 60, 120, 240, 1440]
 
 def _ptime(s, tz):
@@ -473,7 +476,8 @@ def overlays(df, items, limit=12):
         a = ind(df, k, o.get("p"), o.get("q"))
         label = k.upper() + (f" {o['p']}" if o.get("p") else "") + (f"@{o['q']:g}h" if o.get("q") is not None else "")
         out.append(dict(label=label, k=k, p=o.get("p"), q=o.get("q"), pane=PANE.get(k, "price"),
-                        data=[{"time": t[i], "value": round(float(a[i]), 4)} if not np.isnan(a[i]) else {"time": t[i]} for i in range(len(t))]))
+                        data=[({"time": tt, "value": v} if not nan else {"time": tt})
+                              for tt, v, nan in zip(t, np.round(a, 4).tolist(), np.isnan(a).tolist())]))
     return out
 
 def _ov(df, q):
@@ -789,7 +793,7 @@ def prep(q):
     if raw in YF:                                             # NQ, S&P 500 (ES), Gold
         if q.interval not in TF:
             raise HTTPException(400, f"Bad timeframe '{q.interval}'")
-        return load_yahoo(YF[raw], q.interval, max(200, min(q.candles, 20000)), a, b)
+        return load_yahoo(YF[raw], q.interval, max(200, min(q.candles, CAP)), a, b)
     sym = raw
     if sym and len(sym) <= 5 and not sym.endswith(("USDT", "USDC", "BTC")):
         sym += "USDT"                                         # "BTC" -> BTCUSDT
@@ -797,7 +801,7 @@ def prep(q):
         raise HTTPException(400, f"Bad symbol or interval (got symbol='{q.symbol}', interval='{q.interval}'). Use a pair like BTCUSDT (or NQ, ES, GOLD) and a timeframe like 1h")
     if a is not None or b is not None:
         return load_range(sym, q.interval, a, b)
-    return load(sym, q.interval, max(200, min(q.candles, 20000)))
+    return load(sym, q.interval, max(200, min(q.candles, CAP)))
 
 @app.post("/api/backtest")
 def api_backtest(q: Req):
@@ -808,8 +812,8 @@ def api_backtest(q: Req):
         raise HTTPException(400, f"Strategy error: {e!r}")
     t = df["t"].tolist()
     return dict(
-        candles=[dict(time=t[i], open=df.open[i], high=df.high[i], low=df.low[i], close=df.close[i]) for i in range(len(df))],
-        equity=[dict(time=t[i], value=round(float(equity[i]), 2)) for i in range(len(df))],
+        candles=[dict(time=a, open=b, high=c, low=d, close=e) for a, b, c, d, e in zip(t, df["open"].tolist(), df["high"].tolist(), df["low"].tolist(), df["close"].tolist())],
+        equity=[dict(time=a, value=v) for a, v in zip(t, np.round(equity, 2).tolist())],
         trades=trades, metrics=metrics(df, equity, trades, q.interval, cap0), overlays=_ov(df, q), streaks=streak_runs(trades))
 
 def set_path(d, path, v):
